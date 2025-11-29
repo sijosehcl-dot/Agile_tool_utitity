@@ -43,6 +43,15 @@ flowchart LR
   - Retrieve sprint: `ui/sprint_pages.py:116`
 - Config: `config/store.py` with `config/config.json` for JIRA/LLM settings
 
+## Meetings
+- Page: `web/templates/meeting_upload.html`, route: `web/app.py:707`
+- Purpose: Upload or paste meeting transcripts and process them via a Cloud Function.
+- Actions: `MOM` (Minutes of Meeting), `SA` (Sentimental Analysis), `DSM` (Daily Standup), `RET` (Retrospection).
+- Backend API: `POST /api/meeting/process_transcript` (`web/app.py:711`) forwards multipart/form-data to Cloud Function:
+  - Endpoint: `https://us-central1-learngenaiapp.cloudfunctions.net/process_transcript`
+  - Fields: `Action`/`action` and `File`/`file` (or `Transcript`/`text` for raw text)
+- Output: JSON payload with optional `publish` details and `html` preview. The UI also supports publishing results to Confluence; configure Confluence under `Configuration → Confluence`.
+
 ## Key Web Endpoints
 - Sprint Capacity UI: `GET /sprint/capacity` → `web/templates/sprint_capacity.html`
 - Allocate Stories UI: `GET /sprint/allocate` → `web/templates/sprint_allocate.html`
@@ -127,3 +136,4 @@ gcloud run deploy agile-tool \
 ## Notes
 - The app uses `gunicorn` in the container (`web.app:app`).
 - JIRA integration requires valid credentials and project key set via configuration.
+ - The Meetings page invokes a Google Cloud Function; ensure the function is deployed and accessible. Update the URL in `web/app.py:764` if your function location differs.
