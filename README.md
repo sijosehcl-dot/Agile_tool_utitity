@@ -1,6 +1,6 @@
 # Vibe-a-thon Agile Tool
 
-A lightweight Agile planning tool with a web UI (Flask) and a desktop UI (Tkinter). It integrates with JIRA for search, sprint management, and story allocation, and uses local JSON storage for capacity/QBR data.
+This repository hosts the Vibe-a-thon Agile Tool (a.k.a. Agile_tool_utitity), a lightweight Agile planning tool with a web UI (Flask) and a desktop UI (Tkinter). It integrates with JIRA for search, sprint management, and story allocation, and uses local JSON storage for capacity/QBR data.
 
 ## Features
 - Capacity planning by sprint with team inputs and computed availability
