@@ -12,15 +12,22 @@ This repository hosts the Vibe-a-thon Agile Tool (a.k.a. Agile_tool_utitity), a 
 ## Architecture
 ```mermaid
 flowchart LR
-  Browser[Web Browser] -->|HTTP| FlaskApp[Flask Web App\nweb/app.py]
+  Browser[Web Browser] -->|HTTP| CloudRun[Cloud Run Service\nagile-tool]
+  CloudRun -->|Flask routes| FlaskApp[Flask Web App\nweb/app.py]
   FlaskApp -->|Templates| Templates[HTML Templates\nweb/templates/*]
   FlaskApp -->|Storage| Firestore[Local JSON Store\nfirestore.py\n/data/*.json]
   FlaskApp -->|JQL / Agile API| JiraClient[JIRA Client\njira/client.py]
   FlaskApp -->|LLM requests| LLM[LLM Modules\nllm/*]
+  FlaskApp -->|POST /api/meeting/process_transcript| CF[Cloud Function\nprocess_transcript]
+  CF --> Confluence[Confluence Cloud]
   subgraph Desktop UI
     TkApp[Tkinter App\nui/*]
     TkApp --> Firestore
     TkApp --> JiraClient
+  end
+  subgraph GCP
+    CloudRun
+    CF
   end
   JiraClient -->|HTTPS| Jira[JIRA Cloud]
 ```
