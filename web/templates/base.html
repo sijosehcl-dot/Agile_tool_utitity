@@ -1,0 +1,127 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Agile Tool Web</title>
+  <style>
+    :root { --bg:#f6f8fb; --card:#fff; --text:#1f2937; --accent:#2563eb; --muted:#94a3b8; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background: var(--bg); color: var(--text); }
+    .layout { display: grid; grid-template-columns: 300px 1fr; height: 100vh; }
+    .sidebar { background: #eef2f7; padding: 16px; overflow-y: auto; border-right: 1px solid #e5e7eb; }
+    .brand { font-weight: 700; margin: 8px 0 16px; }
+    .section { background: var(--card); border: 1px solid #e5e7eb; border-radius: 12px; margin-bottom: 16px; }
+    .section-header { display:flex; align-items:center; justify-content:space-between; padding: 12px 14px; cursor: pointer; }
+    .section-title { font-weight: 600; }
+    .chev { color: var(--muted); }
+    .section-body { padding: 8px; display: none; }
+    .section.open .section-body { display: block; }
+    .pill { display: block; padding: 10px 12px; margin: 6px 0; border-radius: 12px; background: #e6f0ff; color: #0f172a; text-decoration: none; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+    .pill:hover { background: #d9eaff; }
+    .main { padding: 16px; overflow-y: auto; }
+    .flash { background: #eafaf1; border: 1px solid #2ecc71; padding: 8px; margin-bottom: 12px; }
+    textarea { width: 100%; min-height: 160px; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+  </style>
+  {% block head %}{% endblock %}
+  </head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">Agile Tool</div>
+      <div class="section open" id="sec-features">
+        <div class="section-header" onclick="toggle('sec-features')">
+          <div class="section-title">Features</div>
+          <div class="chev">▾</div>
+        </div>
+        <div class="section-body">
+          <a class="pill" href="/features/create">Create Feature</a>
+          <a class="pill" href="/features/upload">Upload Excel</a>
+          <a class="pill" href="/features/jira">From JIRA</a>
+          <a class="pill" href="/features/dor">Check Feature DOR</a>
+        </div>
+      </div>
+      <div class="section open" id="sec-stories">
+        <div class="section-header" onclick="toggle('sec-stories')">
+          <div class="section-title">Stories</div>
+          <div class="chev">▾</div>
+        </div>
+        <div class="section-body">
+        <a class="pill" href="/stories/jira">Create Stories</a>
+          <a class="pill" href="/stories/dor">Check Story DOR</a>
+        </div>
+      </div>
+      <div class="section open" id="sec-sprint">
+        <div class="section-header" onclick="toggle('sec-sprint')">
+          <div class="section-title">Sprint</div>
+          <div class="chev">▾</div>
+        </div>
+        <div class="section-body">
+          <a class="pill" href="/sprint/capacity">Capacity Planning</a>
+          <a class="pill" href="/sprint/allocate">Allocate Stories</a>
+          <a class="pill" href="/sprint/retrieve">Retrieve Plan</a>
+        </div>
+      </div>
+      <div class="section open" id="sec-qbr">
+        <div class="section-header" onclick="toggle('sec-qbr')">
+          <div class="section-title">QBR</div>
+          <div class="chev">▾</div>
+        </div>
+        <div class="section-body">
+          <a class="pill" href="/qbr/capacity">QBR Capacity Plan</a>
+          <a class="pill" href="/qbr/retrieve">Retrieve Plan</a>
+        </div>
+      </div>
+      <div class="section open" id="sec-meeting">
+        <div class="section-header" onclick="toggle('sec-meeting')">
+          <div class="section-title">Meetings</div>
+          <div class="chev">▾</div>
+        </div>
+        <div class="section-body">
+          <a class="pill" href="/meeting/upload">Upload Transcripts</a>
+        </div>
+      </div>
+      <div class="section open" id="sec-config">
+        <div class="section-header" onclick="toggle('sec-config')">
+          <div class="section-title">Configuration</div>
+          <div class="chev">▾</div>
+        </div>
+        <div class="section-body">
+          <a class="pill" href="/config/jira">JIRA Configuration</a>
+          <a class="pill" href="/config/llm">LLM Configuration</a>
+          <a class="pill" href="/config/confluence">Confluence Configuration</a>
+          <div class="section" style="margin-top:8px;">
+            <div class="section-header" onclick="toggle('sec-prompts')">
+              <div class="section-title">Prompts</div>
+              <div class="chev">▾</div>
+            </div>
+            <div class="section-body" id="sec-prompts" style="display:block;">
+              <a class="pill" href="/prompts/feature_prompt">Feature creation</a>
+              <a class="pill" href="/prompts/story_prompt">Story Creation</a>
+              <a class="pill" href="/prompts/feature_dor_prompt">Feature DOR</a>
+              <a class="pill" href="/prompts/story_dor_prompt">Story DOR</a>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="section" id="sec-logout">
+        <div class="section-header">
+          <a class="pill" href="/logout" style="width:100%">Logout</a>
+        </div>
+      </div>
+    </aside>
+    <main class="main">
+      {% with messages = get_flashed_messages() %}
+        {% if messages %}
+          <div class="flash">{{ messages[0] }}</div>
+        {% endif %}
+      {% endwith %}
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+  <script>
+    function toggle(id){ var el=document.getElementById(id); if(el){ el.classList.toggle('open'); } }
+  </script>
+</body>
+</html>

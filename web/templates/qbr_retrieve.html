@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% block head %}
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-grid.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-theme-quartz.css">
+  <style>
+    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom: 8px; }
+    .row .field { display:flex; flex-direction:column; }
+    .hint { color:#64748b; font-size: 13px; }
+    .label { font-weight:600; margin:10px 0 6px; display:flex; align-items:center; justify-content:space-between; }
+    .export-btn { background:#e6f0ff; border:1px solid #cfe0ff; color:#0f172a; padding:4px 8px; border-radius:8px; cursor:pointer; font-size:12px; }
+    #summaryGrid { height: 200px; }
+    #resCapGrid { height: 360px; }
+  </style>
+{% endblock %}
+{% block content %}
+<h2>Retrieve QBR Plan</h2>
+<div id="error" class="flash" style="display:none"></div>
+<div class="row">
+  <div class="field"><div class="hint">QBR Name</div>
+    <select id="qbrSelect"></select>
+  </div>
+  <div style="align-self:flex-end"><button id="loadBtn">Load</button></div>
+  <div class="progress" id="progress" style="display:none"><div class="bar"></div></div>
+  </div>
+
+<div class="label">QBR Capacity Summary <span id="qbrTotalsRetrieve" class="hint"></span> <button class="export-btn" id="exportSummary">⤓ Export</button></div>
+<div class="ag-theme-quartz" id="summaryGrid"></div>
+
+<div class="label" style="margin-top:12px">Resource Capacity <button class="export-btn" id="exportRes">⤓ Export</button></div>
+<div class="ag-theme-quartz" id="resCapGrid"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community/dist/ag-grid-community.min.js"></script>
+<script>
+  const errorEl = document.getElementById('error');
+  function showError(msg){ errorEl.textContent = msg; errorEl.style.display = 'block'; }
+  function clearError(){ errorEl.textContent = ''; errorEl.style.display = 'none'; }
+
+  const qbrSelect = document.getElementById('qbrSelect');
+  const loadBtn = document.getElementById('loadBtn');
+  const progress = document.getElementById('progress');
+  const summaryGridEl = document.getElementById('summaryGrid');
+  const resCapGridEl = document.getElementById('resCapGrid');
+  let summaryApi=null, resCapApi=null;
+
+  const summaryCols = [
+    { headerName:'Sprint', field:'sprint', width:140 },
+    { headerName:'Start Date', field:'start', width:160 },
+    { headerName:'End Date', field:'end', width:160 },
+    { headerName:'Total Sprint Days', field:'total_sprint_days', width:180 },
+    { headerName:'Available Capacity', field:'available_capacity', width:180 },
+    { headerName:'Available Hours', field:'available_hours', width:160 },
+    { headerName:'Leave days', field:'leave_days', width:140 },
+  ];
+  const summaryOptions = { theme:'legacy', columnDefs:summaryCols, defaultColDef:{resizable:true, sortable:true}, rowData: [] };
+  if (window.agGrid) {
+    if (typeof agGrid.createGrid === 'function') { summaryApi = agGrid.createGrid(summaryGridEl, summaryOptions); }
+    else { new agGrid.Grid(summaryGridEl, summaryOptions); summaryApi = summaryOptions.api; }
+  }
+
+  function buildResCapColumns(summaryRows){
+    const names = Array.isArray(summaryRows) ? summaryRows.map(r => String(r.sprint||'')) : [];
+    const cols = [ { headerName:'Name', field:'name', width:160 }, { headerName:'Role', field:'role', width:120 }, { headerName:'Tech Stack', field:'tech', width:200 } ];
+    for (let i=0;i<names.length;i++){
+      const nm = names[i] ? String(names[i]) : `S${i+1}`;
+      cols.push({ headerName:`Available ${nm} Days`, field:`avail_${i}`, width:180 });
+      cols.push({ headerName:`Available ${nm} Hours`, field:`hours_${i}`, width:180 });
+    }
+    cols.push({ headerName:'Total Capacity', field:'total_capacity', width:160 });
+    cols.push({ headerName:'Total Hours', field:'total_hours', width:140 });
+    return cols;
+  }
+  let resCapOptions = { theme:'legacy', columnDefs:buildResCapColumns([]), defaultColDef:{resizable:true, sortable:true}, rowData: [] };
+  if (window.agGrid) {
+    if (typeof agGrid.createGrid === 'function') { resCapApi = agGrid.createGrid(resCapGridEl, resCapOptions); }
+    else { new agGrid.Grid(resCapGridEl, resCapOptions); resCapApi = resCapOptions.api; }
+  }
+
+  async function loadNames(){
+    try {
+      const res = await fetch('/api/qbr/names');
+      let data; let raw=''; try { data = await res.json(); } catch(_) { raw = await res.text(); }
+      if (!res.ok) { showError((data && data.error) || raw || 'Load failed'); return; }
+      const names = Array.isArray(data.names) ? data.names : [];
+      qbrSelect.innerHTML = names.map(n => `<option value="${String(n)}">${String(n)}</option>`).join('');
+    } catch(e) {
+      showError('Load failed');
+    }
+  }
+  loadNames();
+
+  async function loadQbr(){
+    clearError();
+    const name = (qbrSelect.value||'').trim();
+    if (!name) { showError('Select QBR'); return; }
+    progress.style.display='block';
+    try {
+      const res = await fetch('/api/qbr/capacity/get', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
+      let data; let raw=''; try { data = await res.json(); } catch(_) { raw = await res.text(); }
+      if (!res.ok) { showError((data && data.error) || raw || 'Load failed'); return; }
+      const sum = Array.isArray(data.summary) ? data.summary : [];
+      const resRows = Array.isArray(data.resource_summary) ? data.resource_summary : [];
+      if (summaryApi && typeof summaryApi.setGridOption === 'function') summaryApi.setGridOption('rowData', sum);
+      else if (summaryOptions.api) summaryOptions.api.setRowData(sum);
+      try { let tc=0, th=0, tl=0; for (const r of sum){ tc += Number(r.available_capacity||0); th += Number(r.available_hours||0); tl += Number(r.leave_days||0); } const tEl = document.getElementById('qbrTotalsRetrieve'); if (tEl) tEl.textContent = `QBR Capacity in days = ${Number(tc.toFixed(2))} , Capacity in hours = ${Number(th.toFixed(2))} , Total Leave days = ${Number(tl.toFixed(2))}`; } catch(_) {}
+      const cols = buildResCapColumns(sum);
+      try { if (resCapApi && typeof resCapApi.setGridOption === 'function') resCapApi.setGridOption('columnDefs', cols); else if (resCapOptions.api && typeof resCapOptions.api.setColumnDefs === 'function') resCapOptions.api.setColumnDefs(cols); } catch(_) {}
+      if (resCapApi && typeof resCapApi.setGridOption === 'function') resCapApi.setGridOption('rowData', resRows);
+      else if (resCapOptions.api) resCapOptions.api.setRowData(resRows);
+    } catch(e) {
+      showError('Load failed');
+    } finally {
+      progress.style.display='none';
+    }
+  }
+  loadBtn.addEventListener('click', loadQbr);
+  qbrSelect.addEventListener('change', loadQbr);
+
+  function exportGrid(api, filename){
+    try {
+      if (api && typeof api.exportDataAsCsv === 'function') {
+        api.exportDataAsCsv({ fileName: filename });
+        return;
+      }
+    } catch(_) {}
+    try {
+      const rows=[];
+      if (api && typeof api.forEachNode === 'function') {
+        api.forEachNode(n=>{ if(n&&n.data) rows.push(n.data); });
+      }
+      const cols = Object.keys(rows[0]||{});
+      const csv = [cols.join(',')].concat(rows.map(r=> cols.map(c=> JSON.stringify(r[c] ?? '')).join(','))).join('\n');
+      const blob = new Blob([csv], { type:'text/csv;charset=utf-8;' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename || 'export.csv';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    } catch(e) {
+      showError('Export failed');
+    }
+  }
+
+  document.getElementById('exportSummary').addEventListener('click', () => exportGrid(summaryApi || summaryOptions.api, 'qbr-summary.csv'));
+  document.getElementById('exportRes').addEventListener('click', () => exportGrid(resCapApi || resCapOptions.api, 'qbr-resource-capacity.csv'));
+</script>
+{% endblock %}

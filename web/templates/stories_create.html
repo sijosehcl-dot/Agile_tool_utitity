@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Story Creation</h2>
+<form method="post">
+  <label>Feature Summary</label>
+  <textarea name="feature_summary">{{ text }}</textarea>
+  <p><button type="submit">Generate Stories</button></p>
+</form>
+
+{% if stories %}
+<form method="post" action="/stories/create_jira">
+  <table>
+    <thead>
+      <tr>
+        <th>Title</th><th>Summary</th><th>Story Point</th><th>Priority</th><th>Issue Type</th><th>Tasks</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in stories %}
+      <tr>
+        <td>{{ s.Title }}</td>
+        <td>
+          <input type="hidden" name="story_summary" value="{{ s.Summary }}" />
+          {{ s.Summary }}
+        </td>
+        <td>{{ s['Story Point'] }}</td>
+        <td>{{ s.Priority }}</td>
+        <td>{{ s.Issue_type }}</td>
+        <td>
+          {% for t in s.Tasks %}
+            {{ t.name }}: {{ t.hours }}h{% if not loop.last %}, {% endif %}
+          {% endfor %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p><button type="submit">Create JIRA</button></p>
+</form>
+{% endif %}
+{% endblock %}
+

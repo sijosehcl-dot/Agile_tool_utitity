@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block head %}
+  <style>
+    .row { margin: 6px 0; }
+    textarea { width: 100%; min-height: 260px; }
+    .hint { color:#64748b; font-size: 13px; }
+    .progress { display:none; margin:8px 0; }
+    .progress .bar { width:100%; height:4px; background:#e5e7eb; position:relative; border-radius: 2px; overflow:hidden; }
+    .progress .bar::after { content:''; position:absolute; left:0; top:0; height:4px; width:20%; background:#2563eb; animation: slide 1s infinite; }
+    @keyframes slide { 0%{ left:0 } 50%{ left:80% } 100%{ left:0 } }
+  </style>
+{% endblock %}
+{% block content %}
+<h2>Upload Transcripts</h2>
+<div class="row">
+  <label>Action</label>
+  <select id="action">
+    <option value="MOM">Minutes of Meeting</option>
+    <option value="SA">Sentimental Analysis</option>
+    <option value="DSM">Daily Standup</option>
+    <option value="RET">Retrospection</option>
+  </select>
+</div>
+<div class="row">
+  <label>Upload Transcript</label>
+  <input type="file" id="fileInput" accept=".txt,.md,.csv,.json,.log,.rtf,.html,.xml" />
+</div>
+<div class="row hint">Raw Transcript</div>
+<textarea id="text"></textarea>
+<div class="progress" id="progress"><div class="bar"></div></div>
+<div id="error" class="flash" style="display:none"></div>
+<p>
+  <button id="publishBtn">Publish to Confluence</button>
+</p>
+<div id="resultPanel" style="display:none">
+  <div id="resStatus" class="flash" style="display:none"></div>
+  <div id="resDetails"></div>
+  <div id="resHtml" style="margin-top:12px">
+    <iframe id="htmlFrame" sandbox style="width:100%; min-height:420px; border:1px solid #e5e7eb; border-radius:4px"></iframe>
+  </div>
+  <details style="margin-top:12px">
+    <summary>Raw JSON</summary>
+    <pre id="rawJson"></pre>
+  </details>
+</div>
+<script>
+  const actionEl = document.getElementById('action');
+  const fileEl = document.getElementById('fileInput');
+  const textEl = document.getElementById('text');
+  const progress = document.getElementById('progress');
+  const errorEl = document.getElementById('error');
+  const panelEl = document.getElementById('resultPanel');
+  const resStatusEl = document.getElementById('resStatus');
+  const resDetailsEl = document.getElementById('resDetails');
+  const htmlFrame = document.getElementById('htmlFrame');
+  const rawJsonEl = document.getElementById('rawJson');
+  function showError(msg){ errorEl.textContent = msg; errorEl.style.display = 'block'; }
+  function clearError(){ errorEl.textContent = ''; errorEl.style.display = 'none'; }
+  fileEl.addEventListener('change', () => {
+    clearError(); panelEl.style.display='none'; rawJsonEl.textContent=''; resDetailsEl.innerHTML=''; resStatusEl.style.display='none';
+    const f = fileEl.files && fileEl.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => { textEl.value = reader.result || ''; };
+    reader.onerror = () => { showError('Failed to read file'); };
+    reader.readAsText(f);
+  });
+  document.getElementById('publishBtn').addEventListener('click', async () => {
+    clearError(); panelEl.style.display='none'; rawJsonEl.textContent=''; resDetailsEl.innerHTML=''; resStatusEl.style.display='none';
+    const f = fileEl.files && fileEl.files[0];
+    if (!f && !(textEl.value || '').trim()) { showError('Upload a file or paste transcript'); return; }
+    const fd = new FormData();
+    const act = actionEl.value || 'RET';
+    fd.append('Action', act);
+    fd.append('action', act);
+    if (f) {
+      fd.append('File', f, f.name);
+      fd.append('file', f, f.name);
+    } else {
+      const txt = (textEl.value || '').trim();
+      fd.append('Transcript', txt);
+      fd.append('text', txt);
+    }
+    progress.style.display='block';
+    try {
+      const res = await fetch('/api/meeting/process_transcript', { method:'POST', body: fd });
+      let data; let raw='';
+      try { data = await res.json(); } catch(_) { raw = await res.text(); }
+      if (!res.ok) { showError((data && data.error) || raw || 'Publish failed'); return; }
+      panelEl.style.display='block';
+      rawJsonEl.textContent = JSON.stringify(data, null, 2);
+      const pub = (data && data.publish) || {};
+      const status = pub.status || 'created';
+      resStatusEl.textContent = `Publish status: ${status}`;
+      resStatusEl.style.display = 'block';
+      const rows = [];
+      if (pub.id) rows.push(`<div><strong>Page ID:</strong> ${pub.id}</div>`);
+      if (pub.link) {
+        const link = String(pub.link || '').trim();
+        if (/^https?:\/\//i.test(link)) rows.push(`<div><strong>Confluence Link:</strong> <a href="${link}" target="_blank" rel="noopener">${link}</a></div>`);
+        else rows.push(`<div><strong>Confluence Link:</strong> ${link}</div>`);
+      }
+      if (data.title) rows.push(`<div><strong>Title:</strong> ${String(data.title)}</div>`);
+      resDetailsEl.innerHTML = rows.join('');
+      const html = (data && data.html) || '';
+      try { htmlFrame.setAttribute('srcdoc', html || '<div style="padding:12px;color:#64748b">No HTML provided</div>'); } catch(_) { }
+    } catch(e) {
+      showError('Publish failed');
+    } finally {
+      progress.style.display='none';
+    }
+  });
+  // Pre-fill textarea if server posted data in classic form
+  try {
+    const t = new URLSearchParams(window.location.search).get('text');
+    if (t) { textEl.value = t; }
+  } catch(_) {}
+  </script>
+{% endblock %}
