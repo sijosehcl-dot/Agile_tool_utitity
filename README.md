@@ -20,16 +20,11 @@ flowchart LR
   FlaskApp -->|LLM requests| LLM[LLM Modules\nllm/*]
   FlaskApp -->|POST /api/meeting/process_transcript| CF[Cloud Function\nprocess_transcript]
   CF --> Confluence[Confluence Cloud]
-  subgraph Desktop UI
-    TkApp[Tkinter App\nui/*]
-    TkApp --> Firestore
-    TkApp --> JiraClient
-  end
   subgraph GCP
     CloudRun
     CF
   end
-  JiraClient -->|HTTPS| Jira[JIRA Cloud]
+
 ```
 
 ## Module Guide
