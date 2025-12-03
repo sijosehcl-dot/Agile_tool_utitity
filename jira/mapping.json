@@ -25,10 +25,10 @@
     "Sub-task": ["Sub-task", "Subtask"]
   },
   "size_synonyms": {
-    "XS": ["XS"],
-    "S": ["S"],
-    "M": ["M"],
-    "L": ["L"],
-    "XL": ["XL"]
+    "XS": ["XS", "Extra Small", "X-Small", "X Small"],
+    "S": ["S", "Small"],
+    "M": ["M", "Medium"],
+    "L": ["L", "Large"],
+    "XL": ["XL", "Extra Large", "X-Large", "X Large"]
   }
 }

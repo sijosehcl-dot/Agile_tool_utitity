@@ -1,4 +1,5 @@
 import json
+import re
 import base64
 import ssl as _ssl
 import logging
@@ -244,6 +245,18 @@ def _normalize_size_value(val):
     for t in tokens:
         if t in ("XS", "S", "M", "L", "XL"):
             return t
+    # full-word mappings
+    joined = " ".join(tokens)
+    if joined in ("EXTRA SMALL", "X SMALL", "X-SMALL"):
+        return "XS"
+    if joined == "SMALL":
+        return "S"
+    if joined == "MEDIUM":
+        return "M"
+    if joined == "LARGE":
+        return "L"
+    if joined in ("EXTRA LARGE", "X LARGE", "X-LARGE"):
+        return "XL"
     for t in tokens:
         if t.startswith("X") and "L" in t:
             return "XL"
@@ -392,6 +405,36 @@ def create_issue(issue):
                     if opt.get("id"):
                         fields[wt_field_id] = {"id": opt.get("id")}
                     break
+    # Set Epic Link if creating a story and a feature key is provided
+    try:
+        raw_type = (issue.get("Issue_type") or issue.get("issue_type") or "").strip().lower()
+        is_story = ("story" in raw_type) or (issue.get("Story Point") is not None)
+        fkey = str((issue.get("Feature Key") or issue.get("feature_key") or "")).strip()
+        if is_story and fkey:
+            epic_field = mapping.get("fields", {}).get("epic_link", "customfield_10014")
+            has_epic = False
+            try:
+                projects = meta.get("projects", []) if isinstance(meta, dict) else []
+                for p in projects:
+                    for it in p.get("issuetypes", []):
+                        fields_meta = it.get("fields", {})
+                        if epic_field in fields_meta:
+                            has_epic = True
+                            break
+                        for k in fields_meta.keys():
+                            if k.endswith(epic_field):
+                                has_epic = True
+                                break
+                        if has_epic:
+                            break
+                    if has_epic:
+                        break
+            except Exception:
+                has_epic = False
+            if has_epic:
+                fields[epic_field] = fkey
+    except Exception:
+        pass
     url = base_url.rstrip("/") + "/rest/api/3/issue"
     payload = json.dumps({"fields": fields}).encode("utf-8")
     try:
@@ -449,6 +492,61 @@ def create_issue(issue):
             msg = e.read().decode("utf-8")
         except Exception:
             msg = str(e)
+        try:
+            epic_field = mapping.get("fields", {}).get("epic_link", "customfield_10014")
+            if epic_field in msg:
+                try:
+                    if epic_field in fields:
+                        del fields[epic_field]
+                except Exception:
+                    pass
+                payload2 = json.dumps({"fields": fields}).encode("utf-8")
+                req2 = _req.Request(url, data=payload2, headers={
+                    "Authorization": auth,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                }, method="POST")
+                resp2 = _urlopen(req2, timeout=30)
+                try:
+                    data = json.loads(resp2.read().decode("utf-8"))
+                finally:
+                    try:
+                        resp2.close()
+                    except Exception:
+                        pass
+                new_key = data.get("key", "")
+                fkey = str((issue.get("Feature Key") or issue.get("feature_key") or "")).strip()
+                if new_key and fkey:
+                    try:
+                        link(new_key, fkey)
+                    except RuntimeError as le:
+                        raise
+                    except Exception as e:
+                        raise RuntimeError(f"jira_link_error:{e}")
+                tasks = issue.get("Tasks") or issue.get("Subtasks") or []
+                raw_type = (issue.get("Issue_type") or issue.get("issue_type") or "").strip().lower()
+                is_story = ("story" in raw_type) or (issue.get("Story Point") is not None)
+                if new_key and is_story and isinstance(tasks, list) and tasks:
+                    sub_keys = []
+                    try:
+                        sub_keys = create_subtasks(new_key, tasks)
+                    except Exception:
+                        sub_keys = []
+                    lines = []
+                    for i, t in enumerate(tasks):
+                        nm = (t.get("name") or t.get("title") or f"Task {i+1}")
+                        hrs = t.get("hours")
+                        sk = (sub_keys[i] if i < len(sub_keys) else "").strip()
+                        suffix = f" ({sk})" if sk else ""
+                        part = f"{nm}{suffix} — {hrs}h" if hrs is not None else f"{nm}{suffix}"
+                        lines.append(part)
+                    try:
+                        add_comment(new_key, lines)
+                    except Exception:
+                        pass
+                return {"key": new_key, "status": "created"}
+        except Exception:
+            pass
         raise RuntimeError(f"jira_http_error:{msg}")
     except URLError as e:
         try:
@@ -546,6 +644,10 @@ def search(jql):
     token = jira_cfg.get("token", "").strip()
     if not jql:
         return []
+    try:
+        jql = _sanitize_jql(jql)
+    except Exception:
+        pass
     # Mock if not configured
     if not base_url or not user or not token:
         try:
@@ -617,7 +719,7 @@ def search(jql):
                 "updated": f.get("updated", ""),
                 "dueDate": f.get("duedate", ""),
                 "work_type": _name(f.get("customfield_10112")),
-                "size": _name(f.get("customfield_10114")),
+                "size": _normalize_size_value(_name(f.get("customfield_10114"))),
             })
         return rows
     # Try GET first
@@ -1355,3 +1457,67 @@ def get_open_sprint_names():
     except Exception:
         pass
     return names
+def _sanitize_jql(jql):
+    try:
+        mapping = _load_mapping()
+        names = list((mapping.get("fields") or {}).keys())
+    except Exception:
+        names = []
+    s = str(jql or "")
+    try:
+        s = re.sub(r"(?i)^\s*(fetch|search|find|query)\b[:]*\s*", "", s)
+    except Exception:
+        pass
+    try:
+        fm = mapping.get("fields", {})
+        pairs = [
+            ("Acceptance Criteria", fm.get("Acceptance Criteria")),
+            ("Benefit Hypothesis", fm.get("Benefit Hypothesis")),
+            ("Business Value", fm.get("business_value")),
+        ]
+        for name, fid in pairs:
+            if not fid or not str(fid).startswith("customfield_"):
+                continue
+            cf = "cf[" + str(fid).split("_")[-1] + "]"
+            s = re.sub(r'(?i)(?<!\w)"?' + re.escape(name) + r'"?(?!\w)', cf, s)
+    except Exception:
+        pass
+    for name in names:
+        n = str(name or "")
+        if not n:
+            continue
+        if n.startswith("customfield_"):
+            continue
+        pattern = r'(?<!")\b' + re.escape(n) + r'\b(?!")'
+        s = re.sub(pattern, '"' + n + '"', s)
+    # Map Size values like Small/Medium/Large to S/M/L/XS/XL
+    try:
+        syn = (mapping.get("size_synonyms") or {})
+        # Build reverse map
+        rev = {}
+        for code, arr in syn.items():
+            for a in arr or []:
+                rev[str(a).strip().lower()] = str(code).strip()
+        rev.update({
+            "small": "S", "medium": "M", "large": "L",
+            "extra small": "XS", "x-small": "XS",
+            "extra large": "XL", "x-large": "XL"
+        })
+        def _map_token(tok):
+            t = str(tok or "").strip().strip('"').lower()
+            code = rev.get(t)
+            return ('"' + code + '"') if code else tok
+        # Handle = value
+        s = re.sub(r'("Size"|customfield_10114)\s*=\s*("[^"]+"|[^\s)]+)',
+                   lambda m: f"{m.group(1)} = {_map_token(m.group(2))}", s, flags=re.I)
+        # Handle in (...) list
+        def _map_list(m):
+            field = m.group(1)
+            body = m.group(2)
+            parts = [p.strip() for p in body.split(',')]
+            mapped = [_map_token(p) for p in parts]
+            return f"{field} in ({', '.join(mapped)})"
+        s = re.sub(r'("Size"|customfield_10114)\s+in\s*\(([^)]*)\)', _map_list, s, flags=re.I)
+    except Exception:
+        pass
+    return s
