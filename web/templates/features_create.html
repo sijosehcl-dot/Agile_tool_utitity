@@ -82,8 +82,8 @@
         const res = await fetch('/api/features/generate', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requirement: req })
         });
-        let data; let raw = '';
-        try { data = await res.json(); } catch(_) { raw = await res.text(); }
+        const raw = await res.text();
+        let data = null; try { data = JSON.parse(raw); } catch(_) {}
         if (!res.ok) {
           const msg = (data && data.error) || raw || `Error generating (${res.status})`;
           showError(`${msg}. Please retry again.`);

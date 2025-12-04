@@ -31,9 +31,14 @@ class JiraConfigPage(ttk.Frame):
         self.project.insert(0, j.get("project", ""))
 
     def _save(self):
-        self.cfg["jira"] = {"url": self.url.get(), "user": self.user.get(), "token": self.token.get(), "project": self.project.get()}
-        save_config(self.cfg)
-        messagebox.showinfo("Saved", "JIRA config saved")
+        cur = self.cfg.get("jira", {})
+        cur.update({"url": self.url.get(), "user": self.user.get(), "token": self.token.get(), "project": self.project.get()})
+        self.cfg["jira"] = cur
+        try:
+            save_config(self.cfg)
+            messagebox.showinfo("Saved", "JIRA config saved")
+        except Exception:
+            messagebox.showerror("Error", "Failed to save JIRA configuration")
 
 class LlmConfigPage(ttk.Frame):
     def __init__(self, master):
@@ -52,9 +57,14 @@ class LlmConfigPage(ttk.Frame):
         self.model.insert(0, j.get("model", ""))
 
     def _save(self):
-        self.cfg["llm"] = {"api_key": self.api.get(), "model": self.model.get()}
-        save_config(self.cfg)
-        messagebox.showinfo("Saved", "LLM config saved")
+        cur = self.cfg.get("llm", {})
+        cur.update({"api_key": self.api.get(), "model": self.model.get()})
+        self.cfg["llm"] = cur
+        try:
+            save_config(self.cfg)
+            messagebox.showinfo("Saved", "LLM config saved")
+        except Exception:
+            messagebox.showerror("Error", "Failed to save LLM configuration")
 
 class ConfluenceConfigPage(ttk.Frame):
     def __init__(self, master):
@@ -77,9 +87,14 @@ class ConfluenceConfigPage(ttk.Frame):
         self.page.insert(0, j.get("page", ""))
 
     def _save(self):
-        self.cfg["confluence"] = {"url": self.url.get(), "space": self.space.get(), "page": self.page.get()}
-        save_config(self.cfg)
-        messagebox.showinfo("Saved", "Confluence config saved")
+        cur = self.cfg.get("confluence", {})
+        cur.update({"url": self.url.get(), "space": self.space.get(), "page": self.page.get()})
+        self.cfg["confluence"] = cur
+        try:
+            save_config(self.cfg)
+            messagebox.showinfo("Saved", "Confluence config saved")
+        except Exception:
+            messagebox.showerror("Error", "Failed to save Confluence configuration")
 
 class PromptsPage(ttk.Frame):
     def __init__(self, master, key):

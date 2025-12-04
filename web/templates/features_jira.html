@@ -11,12 +11,21 @@
     .progress .bar::after { content:''; position:absolute; left:0; top:0; height:4px; width:20%; background:#2563eb; animation: slide 1s infinite; }
     @keyframes slide { 0%{ left:0 } 50%{ left:80% } 100%{ left:0 } }
     .label { font-weight:600; margin:10px 0 6px; }
+    .jqlBar { display:flex; align-items:center; gap:16px; }
+    .textareaWrap { position:relative; }
+    .counter { position:absolute; right:8px; top:8px; color:#64748b; font-size: 12px; }
   </style>
 {% endblock %}
 {% block content %}
 <h2>Feature Creation From JIRA</h2>
-<div class="hint">JQL</div>
-<textarea id="jqlInput" placeholder="project = SCRUM AND issuetype = Feature ORDER BY created DESC"></textarea>
+<div class="jqlBar">
+  <div class="label">JQL</div>
+  <label class="label" style="margin-left:16px"><input type="checkbox" id="useNlp"> Use NLP</label>
+  </div>
+<div class="textareaWrap">
+  <textarea id="jqlInput" maxlength="300" placeholder="project = SCRUM AND issuetype = Feature ORDER BY created DESC"></textarea>
+  <span id="jqlCounter" class="counter">0/300</span>
+  </div>
 <p>
   <button id="fetchBtn">Fetch</button>
   <button id="genBtn" disabled>Generate Feature</button>
@@ -109,11 +118,26 @@
   }
   document.getElementById('fetchBtn').addEventListener('click', async () => {
     clearError(); progress.style.display='block';
-    const jql = document.getElementById('jqlInput').value.trim();
-    if (!jql) { showError('Enter JQL'); progress.style.display='none'; return; }
+    let jql = document.getElementById('jqlInput').value.trim();
+    const useNlp = document.getElementById('useNlp');
+    if (useNlp && useNlp.checked) {
+      if (!jql) { showError('Enter query'); progress.style.display='none'; return; }
+      try {
+        const r = await fetch('/api/jira/nlp_to_jql', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text: jql }) });
+        const raw = await r.text();
+        let dj = null; try { dj = JSON.parse(raw); } catch(_) {}
+        if (!r.ok) { showError((dj && dj.error) || raw || 'NLP conversion failed'); progress.style.display='none'; return; }
+        jql = String((dj && dj.jql) || '').trim();
+        if (!jql) { showError('Empty JQL after NLP'); progress.style.display='none'; return; }
+        try { document.getElementById('jqlInput').value = jql; } catch(_) {}
+      } catch(e) { showError(String(e && e.message) || 'NLP conversion failed'); progress.style.display='none'; return; }
+    } else {
+      if (!jql) { showError('Enter JQL'); progress.style.display='none'; return; }
+    }
     try {
       const res = await fetch('/api/features/jira_search', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ jql }) });
-      let data; let raw=''; try { data = await res.json(); } catch(_) { raw = await res.text(); }
+      const raw = await res.text();
+      let data = null; try { data = JSON.parse(raw); } catch(_) {}
       if (!res.ok) { showError((data && data.error) || raw || 'Fetch failed'); return; }
       const rows = Array.isArray(data.rows) ? data.rows : [];
       const buildCols = (rows) => {
@@ -166,6 +190,9 @@
         }
       }
       genBtn.disabled = rows.length === 0;
+      if ((useNlp && useNlp.checked) && rows.length === 0) {
+        showError('The NLP query did not return any results. Please check the query and correct it.');
+      }
     } catch(e) { showError('Fetch failed'); }
     finally { progress.style.display='none'; }
   });
@@ -178,7 +205,8 @@
     progress.style.display='block';
     try {
       const res = await fetch('/api/features/generate_batch', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ requirements: reqs }) });
-      let data; let raw=''; try { data = await res.json(); } catch(_) { raw = await res.text(); }
+      const raw = await res.text();
+      let data = null; try { data = JSON.parse(raw); } catch(_) {}
       if (!res.ok) { showError((data && data.error) || raw || 'Generate failed'); return; }
       const rows = Array.isArray(data.rows) ? data.rows : [];
       if (featGridApi && typeof featGridApi.setGridOption === 'function') {
@@ -222,5 +250,10 @@
     document.body.appendChild(form);
     form.submit();
   });
+  const jqlInput = document.getElementById('jqlInput');
+  const jqlCounter = document.getElementById('jqlCounter');
+  function updateJqlCounter(){ jqlCounter.textContent = (jqlInput.value || '').length + '/300'; }
+  jqlInput.addEventListener('input', updateJqlCounter);
+  updateJqlCounter();
 </script>
 {% endblock %}

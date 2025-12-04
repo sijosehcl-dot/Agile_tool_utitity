@@ -12,7 +12,21 @@
       {% endif %}
     </div>
   {% endfor %}
+  <div style="margin:12px 0; padding:8px; border:1px solid #e5e7eb;">
+    <label>Save Location</label><br/>
+    <select name="save_target" style="width:50%;">
+      <option value="file">Local file (config.json)</option>
+      <option value="secret">GCP Secret Manager</option>
+    </select>
+    <div style="margin-top:8px;">
+      <label>GCP Project ID</label><br/>
+      <input type="text" name="gcp_project_id" value="" style="width:50%;" />
+    </div>
+    <div style="margin-top:8px;">
+      <label>Secret Name</label><br/>
+      <input type="text" name="secret_name" value="config.json" style="width:50%;" />
+    </div>
+  </div>
   <p><button type="submit">Save</button></p>
  </form>
 {% endblock %}
-

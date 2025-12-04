@@ -32,67 +32,36 @@ def score(summary, prompt):
         cfg = load_config()
     except Exception:
         cfg = {}
-    llm = cfg.get("llm", {})
-    api_key = (llm.get("api_key") or "").strip()
-    model = (llm.get("model") or "").strip()
-    if not api_key or not model:
-        raise ValueError("llm_not_configured")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-    payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [
-                    {
-                        "text": f"{txt}\n\nFeature Summary:\n{summary}\n\nReturn ONLY the two lines in this exact format:\nScore: <integer 1-100>\nReason: <brief explanation>"
-                    }
-                ]
-            }
-        ],
-        "generationConfig": {"responseMimeType": "text/plain"}
-    }
-    data = json.dumps(payload).encode("utf-8")
-    req = _req.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    full = f"{txt}\n\nFeature Summary:\n{summary}\n\nReturn ONLY the two lines in this exact format:\nScore: <integer 1-100>\nReason: <brief explanation>"
     try:
-        ctx = None
-        try:
-            import certifi
-            ctx = _ssl.create_default_context(cafile=certifi.where())
-        except Exception:
-            ctx = None
-        if ctx is not None:
-            resp = _req.urlopen(req, timeout=60, context=ctx)
-        else:
-            resp = _req.urlopen(req, timeout=60)
-        try:
-            raw = resp.read().decode("utf-8")
-            obj = json.loads(raw)
-        finally:
+        text = generate_plain_text(full, cfg)
+        sc, st, rs = _parse_text(text)
+        return sc, st, rs
+    except RuntimeError as e:
+        msg = str(e)
+        overloaded = False
+        empty = msg.startswith("llm_empty_output")
+        any_http = msg.startswith("llm_http_error:")
+        if any_http:
+            raw = msg.replace("llm_http_error:", "").strip()
             try:
-                resp.close()
+                obj = json.loads(raw); err = obj.get("error") or obj
+                c = err.get("code"); s = (err.get("status") or "").upper()
+                overloaded = (c == 503) or (s == "UNAVAILABLE")
             except Exception:
-                pass
-    except HTTPError as e:
-        try:
-            msg = e.read().decode("utf-8")
-        except Exception:
-            msg = str(e)
-        raise RuntimeError(f"llm_http_error:{msg}")
-    except URLError as e:
-        try:
-            if isinstance(e.reason, _ssl.SSLError):
-                raise RuntimeError("llm_cert_missing:TLS certificate bundle not found. Install 'certifi' or system CA certificates.")
-        except Exception:
-            pass
-        raise RuntimeError(f"llm_network_error:{e.reason}")
-    except _ssl.SSLError:
-        raise RuntimeError("llm_cert_missing:TLS certificate bundle not found. Install 'certifi' or system CA certificates.")
-    candidates = obj.get("candidates", [])
-    text = ""
-    if candidates:
-        content = candidates[0].get("content", {})
-        parts = content.get("parts", [])
-        if parts:
-            text = parts[0].get("text", "")
-    sc, st, rs = _parse_text(text)
-    return sc, st, rs
+                overloaded = False
+        if any_http or msg.startswith("llm_network_error:") or empty:
+            s = str(summary or "")
+            score = 50
+            if "Acceptance Criteria:" in s: score += 20
+            if "Benefit Hypothesis:" in s: score += 10
+            if "Business Value:" in s: score += 10
+            wc = len(re.findall(r"\w+", s))
+            if wc > 200: score += 5
+            if wc < 50: score -= 10
+            score = max(1, min(100, score))
+            st = "Pass" if score >= 85 else "Fail"
+            rs = "Heuristic DOR due to AI error"
+            return score, st, rs
+        raise
+from .nlp import generate_plain_text

@@ -104,7 +104,8 @@
     try {
       const fd = new FormData(); fd.append('file', f);
       const res = await fetch('/api/features/upload', { method:'POST', body: fd });
-      let data; let raw=''; try { data = await res.json(); } catch(_) { raw = await res.text(); }
+      const raw = await res.text();
+      let data = null; try { data = JSON.parse(raw); } catch(_) {}
       if (!res.ok) { showError((data && data.error) || raw || 'Upload failed'); return; }
       const cols = Array.isArray(data.columns) ? data.columns : [];
       const listRows = Array.isArray(data.rows) ? data.rows : [];
@@ -149,7 +150,8 @@
       if (requirements.length === 0) { showError('Select at least one requirement'); if (progress) progress.style.display='none'; genBtn.disabled=false; return; }
       try {
         const res = await fetch('/api/features/generate_batch', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ requirements }) });
-        let data; let raw=''; try { data = await res.json(); } catch(_) { raw = await res.text(); }
+        const raw = await res.text();
+        let data = null; try { data = JSON.parse(raw); } catch(_) {}
         if (!res.ok) { showError((data && data.error) || raw || 'Error generating. Please retry again.'); return; }
         const rows = Array.isArray(data.rows) ? data.rows : [];
         if (outApi && typeof outApi.setGridOption === 'function') outApi.setGridOption('rowData', rows);

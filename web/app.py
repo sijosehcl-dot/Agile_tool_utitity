@@ -1,9 +1,10 @@
 from flask import Flask, render_template, request, redirect, url_for, flash
 import os, sys, logging
+import json as _json
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from prompt import load_prompts
 from config import load_config
-from llm import feature_creation, feature_dor, story_creation, story_dor, request_features, request_stories
+from llm import feature_creation, feature_dor, story_creation, story_dor, request_features, request_stories, nlp_to_jql
 import jira
 from flask import jsonify
 
@@ -165,8 +166,33 @@ def api_features_generate_batch():
         if not t: continue
         try:
             feats = request_features(t, prompt_text, cfg)
-        except Exception:
-            return jsonify({"error": "LLM request failed"}), 502
+        except RuntimeError as re_err:
+            msg = str(re_err)
+            if msg.startswith("llm_http_error:"):
+                raw = msg.replace("llm_http_error:", "").strip()
+                user_msg = "The AI provider returned an error. Please try again later."
+                try:
+                    obj = _json.loads(raw)
+                    e = obj.get("error") or obj
+                    code = e.get("code")
+                    status = (e.get("status") or "").upper()
+                    message = e.get("message") or str(e)
+                    if code == 429:
+                        user_msg = "Too many requests to the AI service. Please retry in a moment."
+                    elif code == 503 or status == "UNAVAILABLE":
+                        user_msg = "The AI model is currently overloaded. Please try again shortly."
+                    elif code == 404 or status == "NOT_FOUND":
+                        user_msg = "The AI model is not found or unsupported. Please verify the model and API version."
+                except Exception:
+                    pass
+                return jsonify({"error": user_msg}), 502
+            if msg.startswith("llm_network_error:"):
+                return jsonify({"error": "A network error occurred contacting the AI service. Please retry in a moment."}), 502
+            if msg.startswith("llm_cert_missing:"):
+                return jsonify({"error": "A secure connection issue occurred with the AI provider. Please try again later."}), 502
+            return jsonify({"error": "The AI request failed. Please retry in a moment."}), 502
+        except ValueError as ve:
+            return jsonify({"error": "Invalid request"}), 400
         for f in feats:
             rows.append({
                 "title": f.get("Title", ""),
@@ -276,11 +302,30 @@ def api_features_dor_check():
         except RuntimeError as re_err:
             msg = str(re_err)
             if msg.startswith("llm_http_error:"):
-                return jsonify({"error": msg.replace("llm_http_error:", "LLM request failed: ")}), 502
+                raw = msg.replace("llm_http_error:", "").strip()
+                user_msg = "The AI provider returned an error. Please try again later."
+                code = None; status = None; message = raw
+                try:
+                    obj = _json.loads(raw)
+                    e = obj.get("error") or obj
+                    code = e.get("code")
+                    status = (e.get("status") or "").upper()
+                    message = e.get("message") or str(e)
+                    if code == 429:
+                        user_msg = "Too many requests to the AI service. Please retry in a moment."
+                    elif code == 503 or status == "UNAVAILABLE":
+                        user_msg = "The AI model is currently overloaded. Please try again shortly."
+                    elif code == 404 or status == "NOT_FOUND":
+                        user_msg = "The AI model is not found or unsupported for this method. Please verify the model and API version."
+                    else:
+                        user_msg = "The AI request failed. Please retry in a moment."
+                except Exception:
+                    user_msg = "The AI request failed. Please retry in a moment."
+                return jsonify({"error": f"{user_msg} Details: {message}"}), 502
             if msg.startswith("llm_network_error:"):
-                return jsonify({"error": msg.replace("llm_network_error:", "LLM network error: ")}), 502
+                return jsonify({"error": "A network error occurred contacting the AI service. Please retry in a moment."}), 502
             if msg.startswith("llm_cert_missing:"):
-                return jsonify({"error": msg.replace("llm_cert_missing:", "LLM TLS error: ")}), 502
+                return jsonify({"error": "A secure connection issue occurred with the AI provider. Please try again later."}), 502
             sc, st, rs = 0, "Fail", "DOR check failed"
         out.append({"key": key, "summary": summary, "score": sc, "status": st, "reason": rs})
     return jsonify({"rows": out})
@@ -288,21 +333,55 @@ def api_features_dor_check():
 @app.route("/api/features/jira_update_dor_flag", methods=["POST"])
 def api_features_jira_update_dor_flag():
     data = request.get_json(force=True, silent=True) or {}
-    keys = data.get("keys") or []
-    flag = (data.get("flag") or "Y").strip() or "Y"
-    if not isinstance(keys, list) or len(keys) == 0:
-        return jsonify({"error": "No issue keys to update"}), 400
+    pass_keys = data.get("pass_keys") or []
+    fail_keys = data.get("fail_keys") or []
+    fallback_keys = data.get("keys") or []
+    fallback_flag = (data.get("flag") or "").strip()
+    if (not isinstance(pass_keys, list)) or (not isinstance(fail_keys, list)):
+        return jsonify({"error": "Invalid payload"}), 400
+    if len(pass_keys) == 0 and len(fail_keys) == 0:
+        if isinstance(fallback_keys, list) and len(fallback_keys) > 0:
+            if (fallback_flag or "").upper() in ("Y", "YES"):
+                pass_keys = fallback_keys
+            else:
+                fail_keys = fallback_keys
+        else:
+            return jsonify({"error": "No issue keys to update"}), 400
     updated = []
     errors = []
-    for k in keys:
+    results = []
+    for k in pass_keys:
         try:
-            jira.update_dor_flag(str(k), flag)
+            jira.update_dor_flag(str(k), "YES")
+            try:
+                jira.update_status(str(k), "READY")
+                results.append({"key": str(k), "dor": "YES", "status": "READY", "success": True})
+            except Exception as e:
+                errors.append(f"{k}:{str(e)}")
+                results.append({"key": str(k), "dor": "YES", "status": "READY", "success": False, "error": str(e)})
             updated.append(str(k))
         except RuntimeError as re_err:
-            errors.append(f"{k}:{str(re_err)}")
+            msg = str(re_err)
+            errors.append(f"{k}:{msg}")
+            results.append({"key": str(k), "dor": "YES", "status": "READY", "success": False, "error": msg})
         except Exception as e:
-            errors.append(f"{k}:{str(e)}")
-    return jsonify({"updated": updated, "errors": errors})
+            msg = str(e)
+            errors.append(f"{k}:{msg}")
+            results.append({"key": str(k), "dor": "YES", "status": "READY", "success": False, "error": msg})
+    for k in fail_keys:
+        try:
+            jira.update_dor_flag(str(k), "No")
+            results.append({"key": str(k), "dor": "No", "status": "", "success": True})
+            updated.append(str(k))
+        except RuntimeError as re_err:
+            msg = str(re_err)
+            errors.append(f"{k}:{msg}")
+            results.append({"key": str(k), "dor": "No", "status": "", "success": False, "error": msg})
+        except Exception as e:
+            msg = str(e)
+            errors.append(f"{k}:{msg}")
+            results.append({"key": str(k), "dor": "No", "status": "", "success": False, "error": msg})
+    return jsonify({"updated": updated, "errors": errors, "results": results})
 
 @app.route("/features/jira")
 def features_from_jira():
@@ -328,6 +407,67 @@ def api_features_jira_search():
     except Exception:
         return jsonify({"error": "JIRA request failed"}), 502
     return jsonify({"rows": rows})
+
+@app.route("/api/jira/nlp_to_jql", methods=["POST"])
+def api_jira_nlp_to_jql():
+    data = request.get_json(force=True, silent=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "Enter query"}), 400
+    cfg = load_config()
+    project = cfg.get("jira", {}).get("project", "").strip()
+    try:
+        jql = nlp_to_jql(text, project, cfg)
+    except ValueError as ve:
+        if str(ve) == "llm_not_configured":
+            return jsonify({"error": "LLM not configured"}), 400
+        return jsonify({"error": "Invalid request"}), 400
+    except RuntimeError as re_err:
+        msg = str(re_err)
+        if msg.startswith("llm_http_error:"):
+            raw = msg.replace("llm_http_error:", "").strip()
+            user_msg = "The AI model is currently overloaded. Please try again shortly."
+            code = None; status = None; message = raw
+            try:
+                obj = _json.loads(raw)
+                e = obj.get("error") or obj
+                code = e.get("code")
+                status = e.get("status")
+                message = e.get("message") or str(e)
+                if code == 429:
+                    user_msg = "Too many requests to the AI service. Please retry in a moment."
+                elif code == 503 or (status or "").upper() == "UNAVAILABLE":
+                    user_msg = "The AI model is currently overloaded. Please try again shortly."
+                elif code == 404 or (status or "").upper() == "NOT_FOUND":
+                    user_msg = "The AI model is not found or unsupported for this method. Please verify the model and API version."
+                else:
+                    user_msg = "The AI provider returned an error. Please try again later."
+            except Exception:
+                user_msg = "The AI provider returned an error. Please try again later."
+            llm_cfg = load_config().get("llm", {})
+            logger.error("NLPToJQL http_error status=%r code=%r message=%r model=%r alternates=%r raw=%r", status, code, message, llm_cfg.get("model", ""), llm_cfg.get("alternates", []), raw)
+            # Include provider message details for debugging
+            detail = (str(message or "").strip() or str(raw))
+            return jsonify({"error": f"{user_msg} Details: {detail}"}), 502
+        if msg.startswith("llm_network_error:"):
+            raw = msg.replace("llm_network_error:", "").strip()
+            llm_cfg = load_config().get("llm", {})
+            user_msg = "The AI service timed out. Please try again in a moment." if (raw or "").lower() == "timeout" else "A network error occurred contacting the AI service. Please try again."
+            logger.error("NLPToJQL network_error reason=%r model=%r alternates=%r", raw, llm_cfg.get("model", ""), llm_cfg.get("alternates", []))
+            return jsonify({"error": user_msg}), 502
+        if msg.startswith("llm_cert_missing:"):
+            raw = msg.replace("llm_cert_missing:", "").strip()
+            llm_cfg = load_config().get("llm", {})
+            logger.error("NLPToJQL tls_error detail=%r model=%r alternates=%r", raw, llm_cfg.get("model", ""), llm_cfg.get("alternates", []))
+            return jsonify({"error": "A secure connection issue occurred with the AI provider. Please try again later."}), 502
+        if msg.startswith("llm_empty_output"):
+            llm_cfg = load_config().get("llm", {})
+            logger.error("NLPToJQL empty_output model=%r alternates=%r", llm_cfg.get("model", ""), llm_cfg.get("alternates", []))
+            return jsonify({"error": "The AI did not return a result. Please refine your query and try again."}), 502
+        llm_cfg = load_config().get("llm", {})
+        logger.error("NLPToJQL error msg=%r model=%r alternates=%r", msg, llm_cfg.get("model", ""), llm_cfg.get("alternates", []))
+        return jsonify({"error": "We couldn't process your request due to an AI error. Please try again later."}), 502
+    return jsonify({"jql": jql})
 
 @app.route("/stories/create", methods=["GET"])
 def stories_create():
@@ -366,24 +506,44 @@ def api_stories_generate_batch():
         t = (text or "").strip()
         if not t:
             continue
+        stories = None
         try:
             stories = request_stories(t, prompt_text, cfg)
         except ValueError as ve:
             if str(ve) == "llm_not_configured":
-                return jsonify({"error": "LLM not configured"}), 400
-            if str(ve) == "no_prompt":
+                stories = story_creation.generate_stories(t, prompts)
+            elif str(ve) == "no_prompt":
                 return jsonify({"error": "No prompt defined"}), 400
-            return jsonify({"error": "Invalid request"}), 400
+            else:
+                return jsonify({"error": "Invalid request"}), 400
         except RuntimeError as re_err:
             msg = str(re_err)
             if msg.startswith("llm_http_error:"):
-                return jsonify({"error": msg.replace("llm_http_error:", "LLM request failed: ")}), 502
-            if msg.startswith("llm_network_error:"):
-                return jsonify({"error": msg.replace("llm_network_error:", "LLM network error: ")}), 502
-            if msg.startswith("llm_cert_missing:"):
+                raw = msg.replace("llm_http_error:", "").strip()
+                code = None; status = None; message = raw
+                obj = None
+                try:
+                    obj = _json.loads(raw)
+                except Exception:
+                    obj = None
+                try:
+                    e = (obj or {}).get("error") or obj or {}
+                    code = e.get("code")
+                    status = (e.get("status") or "").upper()
+                    message = e.get("message") or raw
+                except Exception:
+                    pass
+                if code == 429 or status == "RESOURCE_EXHAUSTED" or ("quota" in str(message).lower()):
+                    stories = story_creation.generate_stories(t, prompts)
+                else:
+                    return jsonify({"error": "LLM request failed: " + str(message)}), 502
+            elif msg.startswith("llm_network_error:"):
+                stories = story_creation.generate_stories(t, prompts)
+            elif msg.startswith("llm_cert_missing:"):
                 return jsonify({"error": msg.replace("llm_cert_missing:", "LLM TLS error: ")}), 502
-            return jsonify({"error": "LLM request failed"}), 502
-        for st in stories:
+            else:
+                return jsonify({"error": "LLM request failed"}), 502
+        for st in stories or []:
             rows.append({
                 "Feature Key": feature_key,
                 "Title": st.get("Title", "Story"),
@@ -489,11 +649,30 @@ def api_stories_dor_check():
         except RuntimeError as re_err:
             msg = str(re_err)
             if msg.startswith("llm_http_error:"):
-                return jsonify({"error": msg.replace("llm_http_error:", "LLM request failed: ")}), 502
+                raw = msg.replace("llm_http_error:", "").strip()
+                user_msg = "The AI provider returned an error. Please try again later."
+                code = None; status = None; message = raw
+                try:
+                    obj = _json.loads(raw)
+                    e = obj.get("error") or obj
+                    code = e.get("code")
+                    status = (e.get("status") or "").upper()
+                    message = e.get("message") or str(e)
+                    if code == 429:
+                        user_msg = "Too many requests to the AI service. Please retry in a moment."
+                    elif code == 503 or status == "UNAVAILABLE":
+                        user_msg = "The AI model is currently overloaded. Please try again shortly."
+                    elif code == 404 or status == "NOT_FOUND":
+                        user_msg = "The AI model is not found or unsupported for this method. Please verify the model and API version."
+                    else:
+                        user_msg = "The AI request failed. Please retry in a moment."
+                except Exception:
+                    user_msg = "The AI request failed. Please retry in a moment."
+                return jsonify({"error": f"{user_msg} Details: {message}"}), 502
             if msg.startswith("llm_network_error:"):
-                return jsonify({"error": msg.replace("llm_network_error:", "LLM network error: ")}), 502
+                return jsonify({"error": "A network error occurred contacting the AI service. Please retry in a moment."}), 502
             if msg.startswith("llm_cert_missing:"):
-                return jsonify({"error": msg.replace("llm_cert_missing:", "LLM TLS error: ")}), 502
+                return jsonify({"error": "A secure connection issue occurred with the AI provider. Please try again later."}), 502
             sc, st, rs = 0, "Fail", "DOR check failed"
         out.append({"key": key, "summary": summary, "score": sc, "status": st, "reason": rs})
     return jsonify({"rows": out})
@@ -816,19 +995,52 @@ def api_meeting_process_transcript():
             pass
         return jsonify({"error": str(e.reason)}), 502
 
-@app.route("/config/jira", methods=["GET", "POST"])
+@app.route("/config/jira", methods=["GET", "POST"]) 
 def config_jira():
     from config import load_config, save_config
     cfg = load_config()
     if request.method == "POST":
-        cfg["jira"] = {
+        cur = cfg.get("jira", {})
+        cur.update({
             "url": request.form.get("url", ""),
             "user": request.form.get("user", ""),
             "token": request.form.get("token", ""),
             "project": request.form.get("project", ""),
-        }
-        save_config(cfg)
-        flash("JIRA config saved")
+        })
+        cfg["jira"] = cur
+        try:
+            save_config(cfg)
+            flash("JIRA config saved")
+        except Exception:
+            flash("Failed to save JIRA configuration")
+        save_target = request.form.get("save_target", "file")
+        if save_target == "secret":
+            try:
+                from google.cloud import secretmanager
+                client = secretmanager.SecretManagerServiceClient()
+                import os as _os
+                proj = request.form.get("gcp_project_id") or _os.environ.get("GCP_PROJECT_ID") or ""
+                sname = request.form.get("secret_name") or _os.environ.get("GCP_SECRET_NAME") or "config.json"
+                if proj:
+                    parent = f"projects/{proj}/secrets/{sname}"
+                    data = _json.dumps(cfg).encode("utf-8")
+                    ok = True
+                    try:
+                        client.add_secret_version(parent=parent, payload={"data": data})
+                    except Exception:
+                        try:
+                            client.create_secret(parent=f"projects/{proj}", secret_id=sname, secret={"replication": {"automatic": {}}})
+                            client.add_secret_version(parent=parent, payload={"data": data})
+                        except Exception:
+                            ok = False
+                    if ok:
+                        flash("Saved configuration to Secret Manager")
+                    else:
+                        flash("Failed to write configuration to Secret Manager")
+                else:
+                    flash("GCP Project ID is required to save to Secret Manager")
+            except Exception:
+                flash("Secret Manager client not available")
     return render_template("config_form.html", title="JIRA Configuration", fields=[
         ("URL", "url", cfg.get("jira", {}).get("url", "")),
         ("User", "user", cfg.get("jira", {}).get("user", "")),
@@ -836,34 +1048,100 @@ def config_jira():
         ("Project Key", "project", cfg.get("jira", {}).get("project", "")),
     ], secret_names=["token"]) 
 
-@app.route("/config/llm", methods=["GET", "POST"])
+@app.route("/config/llm", methods=["GET", "POST"]) 
 def config_llm():
     from config import load_config, save_config
     cfg = load_config()
     if request.method == "POST":
-        cfg["llm"] = {
+        cur = cfg.get("llm", {})
+        cur.update({
             "api_key": request.form.get("api_key", ""),
             "model": request.form.get("model", ""),
-        }
-        save_config(cfg)
-        flash("LLM config saved")
+        })
+        cfg["llm"] = cur
+        try:
+            save_config(cfg)
+            flash("LLM config saved")
+        except Exception:
+            flash("Failed to save LLM configuration")
+        save_target = request.form.get("save_target", "file")
+        if save_target == "secret":
+            try:
+                from google.cloud import secretmanager
+                client = secretmanager.SecretManagerServiceClient()
+                import os as _os
+                proj = request.form.get("gcp_project_id") or _os.environ.get("GCP_PROJECT_ID") or ""
+                sname = request.form.get("secret_name") or _os.environ.get("GCP_SECRET_NAME") or "config.json"
+                if proj:
+                    parent = f"projects/{proj}/secrets/{sname}"
+                    data = _json.dumps(cfg).encode("utf-8")
+                    ok = True
+                    try:
+                        client.add_secret_version(parent=parent, payload={"data": data})
+                    except Exception:
+                        try:
+                            client.create_secret(parent=f"projects/{proj}", secret_id=sname, secret={"replication": {"automatic": {}}})
+                            client.add_secret_version(parent=parent, payload={"data": data})
+                        except Exception:
+                            ok = False
+                    if ok:
+                        flash("Saved configuration to Secret Manager")
+                    else:
+                        flash("Failed to write configuration to Secret Manager")
+                else:
+                    flash("GCP Project ID is required to save to Secret Manager")
+            except Exception:
+                flash("Secret Manager client not available")
     return render_template("config_form.html", title="LLM Configuration", fields=[
         ("API Key", "api_key", cfg.get("llm", {}).get("api_key", "")),
         ("Model", "model", cfg.get("llm", {}).get("model", "")),
     ], secret_names=["api_key"]) 
 
-@app.route("/config/confluence", methods=["GET", "POST"])
+@app.route("/config/confluence", methods=["GET", "POST"]) 
 def config_confluence():
     from config import load_config, save_config
     cfg = load_config()
     if request.method == "POST":
-        cfg["confluence"] = {
+        cur = cfg.get("confluence", {})
+        cur.update({
             "url": request.form.get("url", ""),
             "space": request.form.get("space", ""),
             "page": request.form.get("page", ""),
-        }
-        save_config(cfg)
-        flash("Confluence config saved")
+        })
+        cfg["confluence"] = cur
+        try:
+            save_config(cfg)
+            flash("Confluence config saved")
+        except Exception:
+            flash("Failed to save Confluence configuration")
+        save_target = request.form.get("save_target", "file")
+        if save_target == "secret":
+            try:
+                from google.cloud import secretmanager
+                client = secretmanager.SecretManagerServiceClient()
+                import os as _os
+                proj = request.form.get("gcp_project_id") or _os.environ.get("GCP_PROJECT_ID") or ""
+                sname = request.form.get("secret_name") or _os.environ.get("GCP_SECRET_NAME") or "config.json"
+                if proj:
+                    parent = f"projects/{proj}/secrets/{sname}"
+                    data = _json.dumps(cfg).encode("utf-8")
+                    ok = True
+                    try:
+                        client.add_secret_version(parent=parent, payload={"data": data})
+                    except Exception:
+                        try:
+                            client.create_secret(parent=f"projects/{proj}", secret_id=sname, secret={"replication": {"automatic": {}}})
+                            client.add_secret_version(parent=parent, payload={"data": data})
+                        except Exception:
+                            ok = False
+                    if ok:
+                        flash("Saved configuration to Secret Manager")
+                    else:
+                        flash("Failed to write configuration to Secret Manager")
+                else:
+                    flash("GCP Project ID is required to save to Secret Manager")
+            except Exception:
+                flash("Secret Manager client not available")
     return render_template("config_form.html", title="Confluence Configuration", fields=[
         ("URL", "url", cfg.get("confluence", {}).get("url", "")),
         ("Space", "space", cfg.get("confluence", {}).get("space", "")),
