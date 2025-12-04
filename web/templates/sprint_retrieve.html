@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block head %}
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-grid.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-theme-quartz.css">
+  <style>
+    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom: 8px; }
+    .row .field { display:flex; flex-direction:column; }
+    .hint { color:#64748b; font-size: 13px; }
+    .label { font-weight:600; margin:10px 0 6px; display:flex; align-items:center; justify-content:space-between; }
+    .export-btn { background:#e6f0ff; border:1px solid #cfe0ff; color:#0f172a; padding:4px 8px; border-radius:8px; cursor:pointer; font-size:12px; }
+    #summaryGrid { height: 120px; }
+    #resGrid { height: 320px; }
+  </style>
+{% endblock %}
+{% block content %}
+<h2>Retrieve Plan</h2>
+<div id="error" class="flash" style="display:none"></div>
+<div class="row">
+  <div class="field"><div class="hint">Sprint Name</div>
+    <select id="sprintSelect"></select>
+  </div>
+  <div style="align-self:flex-end"><button id="loadBtn">Load</button></div>
+  <div class="progress" id="progress" style="display:none"><div class="bar"></div></div>
+  </div>
+
+<div class="label">Sprint Capacity Summary <button class="export-btn" id="exportSummary">⤓ Export</button></div>
+<div class="ag-theme-quartz" id="summaryGrid"></div>
+
+<div class="label" style="margin-top:12px">Resource Capacity <button class="export-btn" id="exportRes">⤓ Export</button></div>
+<div class="ag-theme-quartz" id="resGrid"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community/dist/ag-grid-community.min.js"></script>
+<script>
+  const errorEl = document.getElementById('error');
+  function showError(msg){ errorEl.textContent = msg; errorEl.style.display = 'block'; }
+  function clearError(){ errorEl.textContent = ''; errorEl.style.display = 'none'; }
+
+  const sprintSelect = document.getElementById('sprintSelect');
+  const loadBtn = document.getElementById('loadBtn');
+  const progress = document.getElementById('progress');
+  const summaryGridEl = document.getElementById('summaryGrid');
+  const resGridEl = document.getElementById('resGrid');
+  let summaryApi=null, resApi=null;
+
+  const summaryCols = [
+    { headerName: 'Total Sprint Days', field: 'total_sprint_days', width: 180 },
+    { headerName: 'Available Sprint Days', field: 'available_sprint_days', width: 200 },
+    { headerName: 'Available Capacity', field: 'available_capacity', width: 180 },
+    { headerName: 'Available Hours', field: 'available_hours', width: 160 },
+    { headerName: 'Leave days', field: 'leave_days', width: 140 },
+  ];
+  const summaryOptions = { theme:'legacy', columnDefs:summaryCols, defaultColDef:{resizable:true, sortable:true}, rowData: [] };
+  if (window.agGrid) {
+    if (typeof agGrid.createGrid === 'function') { summaryApi = agGrid.createGrid(summaryGridEl, summaryOptions); }
+    else { new agGrid.Grid(summaryGridEl, summaryOptions); summaryApi = summaryOptions.api; }
+  }
+
+  const resCols = [
+    { headerName: 'Resource name', field: 'name', width: 200 },
+    { headerName: 'Role', field: 'role', width: 140 },
+    { headerName: 'Tech Stack', field: 'tech', width: 220 },
+    { headerName: 'Leave days', field: 'leave', width: 140 },
+    { headerName: 'Available Capacity', field: 'available_capacity', width: 180 },
+    { headerName: 'Available hours', field: 'available_hours', width: 160 },
+  ];
+  const resOptions = { theme:'legacy', columnDefs:resCols, defaultColDef:{resizable:true, sortable:true}, rowData: [] };
+  if (window.agGrid) {
+    if (typeof agGrid.createGrid === 'function') { resApi = agGrid.createGrid(resGridEl, resOptions); }
+    else { new agGrid.Grid(resGridEl, resOptions); resApi = resOptions.api; }
+  }
+
+  async function loadNames(){
+    try {
+      const res = await fetch('/api/sprint/names');
+      let data; let raw=''; try { data = await res.json(); } catch(_) { raw = await res.text(); }
+      if (!res.ok) { showError((data && data.error) || raw || 'Load failed'); return; }
+      const names = Array.isArray(data.names) ? data.names : [];
+      sprintSelect.innerHTML = names.map(n => `<option value="${String(n)}">${String(n)}</option>`).join('');
+    } catch(e) {
+      showError('Load failed');
+    }
+  }
+  loadNames();
+
+  async function loadSprint(){
+    clearError();
+    const name = (sprintSelect.value||'').trim();
+    if (!name) { showError('Select sprint'); return; }
+    progress.style.display='block';
+    try {
+      const res = await fetch('/api/sprint/capacity/get', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
+      let data; let raw=''; try { data = await res.json(); } catch(_) { raw = await res.text(); }
+      if (!res.ok) { showError((data && data.error) || raw || 'Load failed'); return; }
+      const sum = Array.isArray(data.summary) ? data.summary : [];
+      const resRows = Array.isArray(data.resources) ? data.resources : [];
+      if (summaryApi && typeof summaryApi.setGridOption === 'function') summaryApi.setGridOption('rowData', sum);
+      else if (summaryOptions.api) summaryOptions.api.setRowData(sum);
+      if (resApi && typeof resApi.setGridOption === 'function') resApi.setGridOption('rowData', resRows);
+      else if (resOptions.api) resOptions.api.setRowData(resRows);
+    } catch(e) {
+      showError('Load failed');
+    } finally {
+      progress.style.display='none';
+    }
+  }
+  loadBtn.addEventListener('click', loadSprint);
+  sprintSelect.addEventListener('change', loadSprint);
+
+  function exportGrid(api, filename){
+    try {
+      if (api && typeof api.exportDataAsCsv === 'function') {
+        api.exportDataAsCsv({ fileName: filename });
+        return;
+      }
+    } catch(_) {}
+    try {
+      const rows=[];
+      if (api && typeof api.forEachNode === 'function') {
+        api.forEachNode(n=>{ if(n&&n.data) rows.push(n.data); });
+      }
+      const cols = Object.keys(rows[0]||{});
+      const csv = [cols.join(',')].concat(rows.map(r=> cols.map(c=> JSON.stringify(r[c] ?? '')).join(','))).join('\n');
+      const blob = new Blob([csv], { type:'text/csv;charset=utf-8;' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename || 'export.csv';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    } catch(e) {
+      showError('Export failed');
+    }
+  }
+
+  document.getElementById('exportSummary').addEventListener('click', () => exportGrid(summaryApi || summaryOptions.api, 'sprint-summary.csv'));
+  document.getElementById('exportRes').addEventListener('click', () => exportGrid(resApi || resOptions.api, 'resource-capacity.csv'));
+</script>
+{% endblock %}

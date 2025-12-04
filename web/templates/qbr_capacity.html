@@ -1,0 +1,280 @@
+{% extends "base.html" %}
+{% block head %}
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-grid.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-theme-quartz.css">
+  <style>
+    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    .row .field { display:flex; flex-direction:column; }
+    .row input { padding:6px; }
+    .hint { color:#64748b; font-size: 13px; }
+    .progress { display:none; margin:8px 0; }
+    .progress .bar { width:100%; height:4px; background:#e5e7eb; position:relative; border-radius: 2px; overflow:hidden; }
+    .progress .bar::after { content:''; position:absolute; left:0; top:0; height:4px; width:20%; background:#2563eb; animation: slide 1s infinite; }
+    @keyframes slide { 0%{ left:0 } 50%{ left:80% } 100%{ left:0 } }
+    #sprintGrid { height: 220px; }
+    #resGrid { height: 360px; }
+    #summaryGrid, #resCapGrid { height: 220px; }
+    .label { font-weight:600; margin:10px 0 6px; }
+  </style>
+{% endblock %}
+{% block content %}
+<h2>QBR Capacity Plan</h2>
+<div id="error" class="flash" style="display:none"></div>
+
+<div class="row">
+  <div class="field"><div class="hint">QBR Name</div><input id="qbrName" placeholder="QBR-2025Q1"></div>
+  <div class="field"><div class="hint">Haircut % (meetings/trainings)</div><input id="haircutPct" type="number" min="0" max="100" step="0.1" placeholder="10"></div>
+  <div class="field"><div class="hint">Total Sprints</div><input id="sprintCount" type="number" min="0" step="1" placeholder="3"></div>
+  <div class="field"><div class="hint">Total Team Members</div><input id="teamCount" type="number" min="0" step="1" placeholder="5"></div>
+  <div class="field" style="align-self:flex-end"><button id="calcBtn">Calculate</button></div>
+  <div class="field" style="align-self:flex-end"><button id="saveBtn" disabled>Save</button></div>
+  </div>
+
+<div class="label">Sprints</div>
+<div class="ag-theme-quartz" id="sprintGrid"></div>
+
+<div class="label" style="margin-top:12px">Resources</div>
+<div class="ag-theme-quartz" id="resGrid"></div>
+
+<div class="label" style="margin-top:12px">QBR Capacity Summary <span id="qbrTotals" class="hint"></span></div>
+<div class="ag-theme-quartz" id="summaryGrid"></div>
+
+<div class="label" style="margin-top:12px">Resource Capacity</div>
+<div class="ag-theme-quartz" id="resCapGrid"></div>
+
+<div class="progress" id="progress"><div class="bar"></div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community/dist/ag-grid-community.min.js"></script>
+<script>
+  const errorEl = document.getElementById('error');
+  function showError(msg){ errorEl.textContent = msg; errorEl.style.display = 'block'; }
+  function clearError(){ errorEl.textContent = ''; errorEl.style.display = 'none'; }
+
+  const qbrNameEl = document.getElementById('qbrName');
+  const haircutEl = document.getElementById('haircutPct');
+  const sprintCountEl = document.getElementById('sprintCount');
+  const teamCountEl = document.getElementById('teamCount');
+  const calcBtn = document.getElementById('calcBtn');
+  const saveBtn = document.getElementById('saveBtn');
+
+  const sprintGridEl = document.getElementById('sprintGrid');
+  const resGridEl = document.getElementById('resGrid');
+  const summaryGridEl = document.getElementById('summaryGrid');
+  const resCapGridEl = document.getElementById('resCapGrid');
+  let sprintApi=null, resApi=null, summaryApi=null, resCapApi=null;
+  const roles = ['DEV','QA','BA'];
+
+  function parseISODate(s){ try{ if(!s) return null; const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})$/); if(!m) return null; const y=Number(m[1]), mo=Number(m[2])-1, d=Number(m[3]); const dt = new Date(Date.UTC(y,mo,d)); return new Date(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate()); }catch(_){ return null; } }
+  function parseDMY(s){ try{ if(!s) return null; const m = String(s).match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/); if(!m) return null; const d=Number(m[1]), mo=Number(m[2])-1, y=Number(m[3]); return new Date(y,mo,d); }catch(_){ return null; } }
+  function parseDate(s){ try{ if (s instanceof Date) return s; }catch(_){} return parseISODate(s) || parseDMY(s); }
+  function toDate(x){ try{ if(!x) return null; if (x instanceof Date) return x; const s = String(x); const a = parseISODate(s); if (a) return a; const b = String(s).match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})$/); if (b) return new Date(Number(b[3]), Number(b[2])-1, Number(b[1])); return null; }catch(_){ return null; } }
+  function computeWorkingDays(a,b){try{ const da = toDate(a); const db = toDate(b); return businessDaysBetween(da, db); }catch(_){ return 0; } }
+  function businessDaysBetween(a,b){ try{ if(!a||!b) return 0; const s = a<b ? a : b; const e = a<b ? b : a; let n=0; for(let d=new Date(s); d<=e; d.setDate(d.getDate()+1)){ const wd=d.getDay(); if(wd!==0 && wd!==6) n++; } return n; }catch(_){ return 0; } }
+  function recalcAllSprints(){ try{ const api = sprintApi || sprintOptions.api; if(!api) return; if (api && typeof api.forEachNode === 'function') api.forEachNode(n=>{ if(n&&n.data){ const bd = computeWorkingDays(n.data._start_date || n.data.start || '', n.data._end_date || n.data.end || ''); const hol = Number(n.data.holidays||0) || 0; const val = Math.max(0, bd - hol); try{ if (typeof n.setDataValue === 'function') { n.setDataValue('working_days', bd); n.setDataValue('days', val); } else { n.data.working_days = bd; n.data.days = val; } }catch(_){} } }); try{ api.refreshCells(); }catch(_){} }catch(_){} }
+  
+  function recalcSprintDays(idx){ try{ const api = sprintApi || sprintOptions.api; const row = api.getDisplayedRowAtIndex(idx); if(!row||!row.data) return; const bd = computeWorkingDays(row.data._start_date || row.data.start || '', row.data._end_date || row.data.end || ''); const hol = Number(row.data.holidays||0) || 0; const val = Math.max(0, bd - hol); try{ if (typeof row.setDataValue === 'function') { row.setDataValue('working_days', bd); row.setDataValue('days', val); } else { row.data.working_days = bd; row.data.days = val; } }catch(_){} try{ api.refreshCells({ rowNodes: [row], columns: ['working_days','days'] }); }catch(_){} }catch(_){} }
+  function qbrSetDate(el){
+    try {
+      const idx = Number(el.getAttribute('data-row')||0);
+      const id = String(el.getAttribute('data-id')||'');
+      const col = String(el.getAttribute('data-col')||'');
+      const api = sprintApi || sprintOptions.api;
+      let row = api.getDisplayedRowAtIndex(idx);
+      try { if (id && typeof (api.getRowNode||api.getRowNode) === 'function') { const rn = (api.getRowNode && api.getRowNode(id)) || (api.getRowNode && api.getRowNode(id)); if (rn) row = rn; } } catch(_) {}
+      if (!row) return;
+      let val = String(el.value||'');
+      try {
+        const d = el.valueAsDate || parseDate(val);
+        if (d && !isNaN(d.getTime())) {
+          const iso = String(d.toISOString().slice(0,10));
+          val = iso;
+          try { if (col === 'start') row.data._start_date = d; else if (col === 'end') row.data._end_date = d; } catch(_) {}
+        }
+      } catch(_) {}
+      try { if (typeof row.setDataValue === 'function') row.setDataValue(col, val); else { row.data = row.data || {}; row.data[col] = val; } } catch(_) {}
+      recalcSprintDays(idx);
+      recalcAllSprints();
+      try { el.value = val; } catch(_) {}
+      try { api.refreshCells({ rowNodes: [row], columns: ['working_days','days'] }); } catch(_) {}
+    } catch(_) {}
+  }
+  window.qbrSetDate = qbrSetDate;
+  function qbrSetHoliday(el){ try { const idx = Number(el.getAttribute('data-row')||0); const id = String(el.getAttribute('data-id')||''); const api = sprintApi || sprintOptions.api; let row = api.getDisplayedRowAtIndex(idx); try { if (id && typeof (api.getRowNode||api.getRowNode) === 'function') { const rn = (api.getRowNode && api.getRowNode(id)) || (api.getRowNode && api.getRowNode(id)); if (rn) row = rn; } } catch(_) {} if (row && row.data) { const v = Number(el.value||0); row.data.holidays = isNaN(v)?0:v; recalcSprintDays(idx); recalcAllSprints(); try{ api.refreshCells({ rowNodes: [row], columns: ['working_days','days'] }); }catch(_){} } } catch(_){} }
+  window.qbrSetHoliday = qbrSetHoliday;
+
+  let openSprintNames = [];
+  function sprintColumns(){ return [
+    { headerName:'Sprint Name', field:'name', width:160, cellRenderer:(p)=>{
+        const curr = (p && p.data && p.data.name) ? String(p.data.name) : '';
+        const opts = (openSprintNames||[]).map(n => `<option value="${String(n)}" ${curr===String(n)?'selected':''}>${String(n)}</option>`).join('');
+        return `<select data-row="${p && p.rowIndex}" data-id="${p && p.node && p.node.id}" onchange="qbrSetSprintName(this)" oninput="qbrSetSprintName(this)"><option value="">Select Sprint</option>${opts}</select>`;
+      } },
+    { headerName:'Start Date', field:'start', width:160, cellRenderer:(p)=>{ const v = (p && p.data && p.data.start) ? String(p.data.start) : ''; return `<input type="date" value="${v}" data-row="${p && p.rowIndex}" data-id="${p && p.node && p.node.id}" data-col="start" onchange="qbrSetDate(this)" oninput="qbrSetDate(this)" onblur="qbrSetDate(this)" />`; } },
+    { headerName:'End Date', field:'end', width:160, cellRenderer:(p)=>{ const v = (p && p.data && p.data.end) ? String(p.data.end) : ''; return `<input type="date" value="${v}" data-row="${p && p.rowIndex}" data-id="${p && p.node && p.node.id}" data-col="end" onchange="qbrSetDate(this)" oninput="qbrSetDate(this)" onblur="qbrSetDate(this)" />`; } },
+    { headerName:'Holidays', field:'holidays', width:120, cellRenderer:(p)=>{ const v = Number(p && p.value || 0); return `<input type="number" min="0" step="1" value="${v}" data-row="${p && p.rowIndex}" data-id="${p && p.node && p.node.id}" onchange="qbrSetHoliday(this)" oninput="qbrSetHoliday(this)" onblur="qbrSetHoliday(this)" />`; } },
+    { headerName:'Working Days', field:'working_days', editable:false, width:140 },
+    { headerName:'Sprint Days', field:'days', editable:false, width:140 },
+  ]; }
+  const sprintOptions = { theme:'legacy', columnDefs:sprintColumns(), defaultColDef:{resizable:true, sortable:true}, rowData: [] };
+  if (window.agGrid) { if (typeof agGrid.createGrid === 'function') { sprintApi = agGrid.createGrid(sprintGridEl, sprintOptions); } else { new agGrid.Grid(sprintGridEl, sprintOptions); sprintApi = sprintOptions.api; } }
+
+  function qbrSetSprintName(el){
+    try {
+      const idx = Number(el.getAttribute('data-row')||0);
+      const id = String(el.getAttribute('data-id')||'');
+      const api = sprintApi || sprintOptions.api;
+      let row = api.getDisplayedRowAtIndex(idx);
+      try { if (id && typeof (api.getRowNode||api.getRowNode) === 'function') { const rn = (api.getRowNode && api.getRowNode(id)) || (api.getRowNode && api.getRowNode(id)); if (rn) row = rn; } } catch(_) {}
+      const val = String(el.value||'');
+      if (row) {
+        try { if (typeof row.setDataValue === 'function') row.setDataValue('name', val); else { row.data = row.data || {}; row.data.name = val; } } catch(_) {}
+        try { api.refreshCells({ rowNodes: [row], columns: ['name'] }); } catch(_) {}
+      }
+      refreshResourceGrid();
+    } catch(_) {}
+  }
+  window.qbrSetSprintName = qbrSetSprintName;
+
+  async function loadOpenSprints(){
+    try {
+      const res = await fetch('/api/jira/open_sprints');
+      let data; let raw=''; try { data = await res.json(); } catch(_) { raw = await res.text(); }
+      if (!res.ok) { showError((data && data.error) || raw || 'Fetch open sprints failed'); return; }
+      openSprintNames = Array.isArray(data.names) ? data.names : [];
+      const cols = sprintColumns();
+      try { if (sprintApi && typeof sprintApi.setGridOption === 'function') sprintApi.setGridOption('columnDefs', cols); else if (sprintOptions.api && typeof sprintOptions.api.setColumnDefs === 'function') sprintOptions.api.setColumnDefs(cols); } catch(_){}
+    } catch(e) { showError('Fetch open sprints failed'); }
+  }
+  loadOpenSprints();
+
+  function getSprintNames(){ const rows = []; const api = sprintApi || sprintOptions.api; if (api && typeof api.forEachNode === 'function') api.forEachNode(n=>{ if(n&&n.data) rows.push(String(n.data.name||'')); }); return rows; }
+  function resourceColumns(){
+    const n = Number(sprintCountEl.value||0);
+    const names = getSprintNames();
+    const cols = [
+      { headerName:'Name', field:'name', editable:true, width:160 },
+      { headerName:'Role', field:'role', editable:true, width:140, cellEditor: 'agSelectCellEditor', cellEditorParams: { values: roles } },
+      { headerName:'Tech Stack', field:'tech', editable:true, width:200 }
+    ];
+    for (let i=0;i<n;i++){
+      const nm = names[i] ? String(names[i]) : `S${i+1}`;
+      cols.push({ headerName:`Leave ${nm}`, field:`leave_${i}`, editable:true, width:140, valueSetter:(p)=>{ const v = Number(p.newValue||0); p.data[`leave_${i}`] = isNaN(v)? 0 : v; return true; } });
+    }
+    return cols;
+  }
+  const resOptions = { theme:'legacy', columnDefs:resourceColumns(), defaultColDef:{resizable:true, sortable:true}, rowData: [] };
+  if (window.agGrid) { if (typeof agGrid.createGrid === 'function') { resApi = agGrid.createGrid(resGridEl, resOptions); } else { new agGrid.Grid(resGridEl, resOptions); resApi = resOptions.api; } }
+
+  function refreshResourceGrid(){
+    const cols = resourceColumns();
+    try { if (resApi && typeof resApi.setGridOption === 'function') resApi.setGridOption('columnDefs', cols); else if (resOptions.api && typeof resOptions.api.setColumnDefs === 'function') resOptions.api.setColumnDefs(cols); } catch(_){}
+    const team = getTeamRows();
+    try { if (resApi && typeof resApi.setGridOption === 'function') resApi.setGridOption('rowData', team); else if (resOptions.api) resOptions.api.setRowData(team); } catch(_){}
+  }
+
+  sprintCountEl.addEventListener('input', () => {
+    const n = Number(sprintCountEl.value||0);
+    const rows = []; for (let i=0;i<n;i++) rows.push({ name:`S${i+1}`, start:'', end:'', holidays:0, working_days:0, days:0 });
+    if (sprintApi && typeof sprintApi.setGridOption === 'function') sprintApi.setGridOption('rowData', rows);
+    else if (sprintOptions.api) sprintOptions.api.setRowData(rows);
+    refreshResourceGrid();
+    recalcAllSprints();
+  });
+
+  teamCountEl.addEventListener('input', () => {
+    const n = Number(teamCountEl.value||0);
+    const rows = []; for (let i=0;i<n;i++) rows.push({ name:'', role: roles[i%roles.length], tech:'' });
+    if (resApi && typeof resApi.setGridOption === 'function') resApi.setGridOption('rowData', rows);
+    else if (resOptions.api) resOptions.api.setRowData(rows);
+  });
+
+  const summaryCols = [
+    { headerName:'Sprint', field:'sprint', width:140 },
+    { headerName:'Start Date', field:'start', width:160 },
+    { headerName:'End Date', field:'end', width:160 },
+    { headerName:'Total Sprint Days', field:'total_sprint_days', width:180 },
+    { headerName:'Available Capacity', field:'available_capacity', width:180 },
+    { headerName:'Available Hours', field:'available_hours', width:160 },
+    { headerName:'Leave days', field:'leave_days', width:140 },
+  ];
+  const summaryOptions = { theme:'legacy', columnDefs:summaryCols, defaultColDef:{resizable:true, sortable:true}, rowData: [] };
+  if (window.agGrid) { if (typeof agGrid.createGrid === 'function') { summaryApi = agGrid.createGrid(summaryGridEl, summaryOptions); } else { new agGrid.Grid(summaryGridEl, summaryOptions); summaryApi = summaryOptions.api; } }
+
+  function resCapColumns(){
+    const n = Number(sprintCountEl.value||0);
+    const names = getSprintNames();
+    const cols = [ { headerName:'Name', field:'name', width:160 }, { headerName:'Role', field:'role', width:120 }, { headerName:'Tech Stack', field:'tech', width:200 } ];
+    for (let i=0;i<n;i++){
+      const nm = names[i] ? String(names[i]) : `S${i+1}`;
+      cols.push({ headerName:`Available ${nm} Days`, field:`avail_${i}`, width:180 });
+      cols.push({ headerName:`Available ${nm} Hours`, field:`hours_${i}`, width:180 });
+    }
+    cols.push({ headerName:'Total Capacity', field:'total_capacity', width:160 });
+    cols.push({ headerName:'Total Hours', field:'total_hours', width:140 });
+    return cols;
+  }
+  const resCapOptions = { theme:'legacy', columnDefs:resCapColumns(), defaultColDef:{resizable:true, sortable:true}, rowData: [] };
+  if (window.agGrid) { if (typeof agGrid.createGrid === 'function') { resCapApi = agGrid.createGrid(resCapGridEl, resCapOptions); } else { new agGrid.Grid(resCapGridEl, resCapOptions); resCapApi = resCapOptions.api; } }
+
+  function getSprintRows(){ const api = sprintApi || sprintOptions.api; const out=[]; if (api && typeof api.forEachNode === 'function') api.forEachNode(n=>{ if(n&&n.data) out.push({ name:n.data.name||'', start:n.data.start||'', end:n.data.end||'', holidays:Number(n.data.holidays||0), days:Number(n.data.days||0) }); }); return out; }
+  function getTeamRows(){ const api = resApi || resOptions.api; const out=[]; if (api && typeof api.forEachNode === 'function') api.forEachNode(n=>{ if(n&&n.data){ const r = { name:n.data.name||'', role:n.data.role||'', tech:n.data.tech||'' }; const m = Number(sprintCountEl.value||0); for(let i=0;i<m;i++){ r[`leave_${i}`] = Number(n.data[`leave_${i}`]||0); } out.push(r); } }); return out; }
+
+  calcBtn.addEventListener('click', () => {
+    clearError();
+    refreshResourceGrid();
+    const hcPct = Number(haircutEl.value||0);
+    const sprints = getSprintRows();
+    const team = getTeamRows();
+    const teamCount = team.length;
+    const sumRows = [];
+    const resCapRows = team.map(r => ({ name:r.name, role:r.role, tech:r.tech }));
+    let totalCapacitySum = 0, totalHoursSum = 0, totalLeaveSum = 0;
+    sprints.forEach((sp, idx) => {
+      const totalDaysInSprint = Number(sp.days||0) * teamCount;
+      const haircutDaysSprint = (hcPct/100) * Number(sp.days||0) * teamCount;
+      let leavesTotal = 0;
+      team.forEach(r => { leavesTotal += Number(r[`leave_${idx}`]||0); });
+      const sprintCapacity = Math.max(0, totalDaysInSprint - (haircutDaysSprint + leavesTotal));
+      const availableHours = sprintCapacity * 8;
+      sumRows.push({ sprint: sp.name || `S${idx+1}`, start: sp.start || '', end: sp.end || '', total_sprint_days: totalDaysInSprint, available_capacity: Number(sprintCapacity.toFixed(2)), available_hours: Number(availableHours.toFixed(2)), leave_days: Number(leavesTotal.toFixed(2)) });
+      totalCapacitySum += Number(sprintCapacity||0);
+      totalHoursSum += Number(availableHours||0);
+      totalLeaveSum += Number(leavesTotal||0);
+      resCapRows.forEach((rr, ridx) => {
+        const leave = Number(team[ridx][`leave_${idx}`]||0);
+        const availCap = Math.max(0, Number(sp.days||0) - ((hcPct/100)*Number(sp.days||0)) - leave);
+        const availHrs = availCap * 8;
+        rr[`avail_${idx}`] = Number(availCap.toFixed(2));
+        rr[`hours_${idx}`] = Number(availHrs.toFixed(2));
+      });
+    });
+    resCapRows.forEach(rr => { let tc=0, th=0; const m=Number(sprintCountEl.value||0); for(let i=0;i<m;i++){ tc += Number(rr[`avail_${i}`]||0); th += Number(rr[`hours_${i}`]||0); } rr.total_capacity = Number(tc.toFixed(2)); rr.total_hours = Number(th.toFixed(2)); });
+    if (summaryApi && typeof summaryApi.setGridOption === 'function') summaryApi.setGridOption('rowData', sumRows); else if (summaryOptions.api) summaryOptions.api.setRowData(sumRows);
+    const cols = resCapColumns(); if (resCapApi && typeof resCapApi.setGridOption === 'function') resCapApi.setGridOption('columnDefs', cols); else if (resCapOptions.api && typeof resCapOptions.api.setColumnDefs === 'function') resCapOptions.api.setColumnDefs(cols);
+    if (resCapApi && typeof resCapApi.setGridOption === 'function') resCapApi.setGridOption('rowData', resCapRows); else if (resCapOptions.api) resCapOptions.api.setRowData(resCapRows);
+    try { const totalsEl = document.getElementById('qbrTotals'); if (totalsEl) totalsEl.textContent = `QBR Capacity = ${Number(totalCapacitySum.toFixed(2))} , Capacity in hours = ${Number(totalHoursSum.toFixed(2))} , Total Leave= ${Number(totalLeaveSum.toFixed(2))}`; } catch(_) {}
+    saveBtn.disabled = true; try { if (sumRows.length || resCapRows.length) saveBtn.disabled = false; } catch(_) {}
+  });
+
+  saveBtn.addEventListener('click', async () => {
+    clearError();
+    const record = {
+      qbr_name: (qbrNameEl.value||'').trim(),
+      haircut: Number(haircutEl.value||0),
+      sprints: getSprintRows(),
+      resources: getTeamRows(),
+      summary: (function(){ const api = summaryApi || summaryOptions.api; const rows=[]; if (api && typeof api.forEachNode === 'function') api.forEachNode(n=>{ if(n&&n.data) rows.push(n.data); }); return rows; })(),
+      resource_summary: (function(){ const api = resCapApi || resCapOptions.api; const rows=[]; if (api && typeof api.forEachNode === 'function') api.forEachNode(n=>{ if(n&&n.data) rows.push(n.data); }); return rows; })(),
+    };
+    if (!record.qbr_name) { showError('Enter QBR Name'); return; }
+    try {
+      const res = await fetch('/api/qbr/capacity/save', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(record) });
+      let data; let raw=''; try { data = await res.json(); } catch(_) { raw = await res.text(); }
+      if (!res.ok) { showError((data && data.error) || raw || 'Save failed'); return; }
+      showError('Saved');
+    } catch(e) {
+      showError('Save failed');
+    }
+  });
+</script>
+{% endblock %}

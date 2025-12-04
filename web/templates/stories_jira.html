@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+{% block head %}
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-grid.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-theme-quartz.css">
+  <style>
+    .hint { color:#64748b; font-size: 13px; margin-bottom:8px; }
+    textarea { width:100%; min-height: 120px; }
+    .progress { display:none; margin:8px 0; }
+    .progress .bar { width:100%; height:4px; background:#e5e7eb; position:relative; border-radius: 2px; overflow:hidden; }
+    .progress .bar::after { content:''; position:absolute; left:0; top:0; height:4px; width:20%; background:#2563eb; animation: slide 1s infinite; }
+    @keyframes slide { 0%{ left:0 } 50%{ left:80% } 100%{ left:0 } }
+    .label { font-weight:600; margin:10px 0 6px; }
+    #featGrid, #storyGrid { height: 420px; }
+    #featGrid { overflow:auto }
+  </style>
+{% endblock %}
+{% block content %}
+<h2>Create Stories From JIRA</h2>
+<div class="hint">JQL</div>
+<textarea id="jqlInput" placeholder="project = SCRUM AND issuetype = Feature ORDER BY created DESC"></textarea>
+<p>
+  <button id="fetchBtn">Fetch</button>
+  <button id="createStoriesBtn" disabled>Create Stories</button>
+  <button id="createJiraBtn" disabled>Create JIRA</button>
+</p>
+
+<div class="progress" id="progress"><div class="bar"></div></div>
+<div id="error" class="flash" style="display:none"></div>
+
+<div class="label">Features</div>
+<div class="ag-theme-quartz" id="featGrid"></div>
+
+<div class="label">Stories</div>
+<div class="ag-theme-quartz" id="storyGrid" style="margin-top:8px; overflow:auto"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community/dist/ag-grid-community.min.js"></script>
+<script>
+  const errorEl = document.getElementById('error');
+  const progress = document.getElementById('progress');
+  function showError(msg){ errorEl.textContent = msg; errorEl.style.display = 'block'; }
+  function clearError(){ errorEl.textContent = ''; errorEl.style.display = 'none'; }
+
+  const featEl = document.getElementById('featGrid');
+  let featApi = null;
+  const featCols = [
+    { headerName: '', checkboxSelection: true, headerCheckboxSelection: true, width: 40 },
+    { headerName: 'Key', field: 'key', width: 120 },
+    { headerName: 'Title', valueGetter:(p)=> (p&&p.data?p.data.summary:''), tooltipValueGetter:(p)=> String((p&&p.value)||''), width:200 },
+    { headerName: 'Summary', field: 'summary', tooltipField:'summary', width:240 },
+    { headerName: 'Acceptance Criteria', field: 'acceptance', tooltipField:'acceptance', width:240 },
+    { headerName: 'Benefit Hypothesis', field: 'benefit', tooltipField:'benefit', width:200 },
+    { headerName: 'Business Value', field: 'businessValue', width: 140 },
+    { headerName: 'Priority', field: 'priority', width: 120 },
+    { headerName: 'DOR', field: 'dor', width: 100 },
+    { headerName: 'Size', field: 'size', width: 120 },
+    { headerName: 'Status', field: 'status', width: 140 },
+    { headerName: 'Type', field: 'issue_type', width: 120 }
+  ];
+  const featOptions = { theme:'legacy', rowSelection:'multiple', columnDefs:featCols, defaultColDef:{resizable:true, sortable:true, tooltipValueGetter:(p)=> String((p&&p.value)||'')}, tooltipShowDelay:0, tooltipHideDelay:10000, rowData:[] };
+  if (window.agGrid && featEl) {
+    if (typeof agGrid.createGrid === 'function') { featApi = agGrid.createGrid(featEl, featOptions); }
+    else { new agGrid.Grid(featEl, featOptions); featApi = featOptions.api; }
+  }
+
+  const storyEl = document.getElementById('storyGrid');
+  let storyApi = null;
+  const storyCols = [
+    { headerName: '', checkboxSelection: true, headerCheckboxSelection: true, width: 40 },
+    { headerName: 'Feature Key', field: 'Feature Key', width: 120, tooltipValueGetter:(p)=> String((p&&p.value)||'') },
+    { headerName: 'Title', field: 'Title', width: 200, tooltipValueGetter:(p)=> String((p&&p.value)||'') },
+    { headerName: 'Description', field: 'Description', width: 240, tooltipField:'Description' },
+    { headerName: 'Acceptance Criteria', field: 'Acceptance Criteria', width: 240, tooltipField:'Acceptance Criteria' },
+    { headerName: 'Subtasks', field: 'Subtasks', flex: 2, cellRenderer: (p)=>{
+      const v = p.value; if (!Array.isArray(v)) return '';
+      return v.map(t => `${t.name}: ${t.hours}h`).join('; ');
+    } },
+    { headerName: 'Story points', field: 'Story Point', width: 120 },
+    { headerName: 'Work type', field: 'Issue_type', width: 120 }
+  ];
+  const storyOptions = { theme:'legacy', rowSelection:'multiple', columnDefs:storyCols, defaultColDef:{resizable:true, sortable:true, tooltipValueGetter:(p)=> String((p&&p.value)||'')}, tooltipShowDelay:0, tooltipHideDelay:10000, rowData:[] };
+  if (window.agGrid && storyEl) {
+    if (typeof agGrid.createGrid === 'function') { storyApi = agGrid.createGrid(storyEl, storyOptions); }
+    else { new agGrid.Grid(storyEl, storyOptions); storyApi = storyOptions.api; }
+  }
+
+  const fetchBtn = document.getElementById('fetchBtn');
+  const createStoriesBtn = document.getElementById('createStoriesBtn');
+  const createJiraBtn = document.getElementById('createJiraBtn');
+
+  fetchBtn.addEventListener('click', async () => {
+    clearError(); progress.style.display='block';
+    const jql = document.getElementById('jqlInput').value.trim();
+    if (!jql) { showError('Enter JQL'); progress.style.display='none'; return; }
+    try {
+      const res = await fetch('/api/features/jira_search', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ jql }) });
+      let data; let raw=''; try { data = await res.json(); } catch(_) { raw = await res.text(); }
+      if (!res.ok) { showError((data && data.error) || raw || 'Fetch failed'); return; }
+      const rows = Array.isArray(data.rows) ? data.rows : [];
+      // rebuild columns to include any additional fields
+      const preferred = ['key','Title','summary','acceptance','benefit','businessValue','priority','dor','size','status'];
+      const pretty = (k) => String(k).replace(/_/g,' ').replace(/([a-z])([A-Z])/g,'$1 $2').replace(/^\w/, c => c.toUpperCase());
+      const cols = [{ headerName: '', checkboxSelection: true, headerCheckboxSelection: true, width: 40 }];
+      const added = new Set();
+      const addCol = (field) => {
+        if (added.has(field)) return;
+        added.add(field);
+        if (field === 'Title') {
+          cols.push({ headerName:'Title', valueGetter:(p)=> (p&&p.data?p.data.summary:''), tooltipValueGetter:(p)=> String((p&&p.value)||''), width:200 });
+          return;
+        }
+        const cfg = { headerName: pretty(field), field: field, tooltipField: field, width: 160 };
+        if (field === 'summary' || field === 'acceptance' || field === 'benefit' || field === 'description') cfg.width = 240;
+        cols.push(cfg);
+      };
+      const keys = rows[0] ? Object.keys(rows[0]) : [];
+      for (const f of preferred) { if (f==='Title' || keys.includes(f)) addCol(f); }
+      for (const k of keys) { if (!added.has(k)) addCol(k); }
+      if (featApi && typeof featApi.destroy === 'function') { try { featApi.destroy(); } catch(_) {} featApi = null; }
+      try { featEl.innerHTML = ''; } catch(_) {}
+      try {
+        featOptions.columnDefs = cols;
+        featOptions.rowData = rows;
+        if (typeof agGrid.createGrid === 'function') { featApi = agGrid.createGrid(featEl, featOptions); }
+        else { new agGrid.Grid(featEl, featOptions); featApi = featOptions.api; }
+      } catch(_) {
+        if (featOptions.api && typeof featOptions.api.setColumnDefs === 'function') {
+          featOptions.api.setColumnDefs(cols);
+          featOptions.api.setRowData(rows);
+        }
+      }
+      createStoriesBtn.disabled = rows.length === 0;
+      createJiraBtn.disabled = true;
+      if (storyApi && typeof storyApi.setGridOption === 'function') { storyApi.setGridOption('rowData', []); }
+      else if (storyOptions.api) { storyOptions.api.setRowData([]); }
+    } catch(e) { showError('Fetch failed'); }
+    finally { progress.style.display='none'; }
+  });
+
+  createStoriesBtn.addEventListener('click', async () => {
+    clearError();
+    const sel = (featApi && typeof featApi.getSelectedRows === 'function') ? featApi.getSelectedRows() : (featOptions.api ? featOptions.api.getSelectedRows() : []);
+    if (!sel || sel.length === 0) { showError('Select features'); return; }
+    createStoriesBtn.disabled = true;
+    createJiraBtn.disabled = true;
+    progress.style.display='block';
+    try {
+      const res = await fetch('/api/stories/generate_batch', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ features: sel }) });
+      let data; let raw=''; try { data = await res.json(); } catch(_) { raw = await res.text(); }
+      if (!res.ok) { showError((data && data.error) || raw || 'Generate failed'); return; }
+      const rows = Array.isArray(data.rows) ? data.rows : [];
+      if (storyApi && typeof storyApi.setGridOption === 'function') { storyApi.setGridOption('rowData', rows); }
+      else if (storyOptions.api) { storyOptions.api.setRowData(rows); }
+      createJiraBtn.disabled = rows.length === 0;
+    } catch(e) { showError('Generate failed'); }
+    finally { progress.style.display='none'; createStoriesBtn.disabled = false; }
+  });
+
+  createJiraBtn.addEventListener('click', async () => {
+    clearError();
+    const api = (storyApi && typeof storyApi.getSelectedRows === 'function') ? storyApi : storyOptions.api;
+    let sel = [];
+    if (api && typeof api.getSelectedRows === 'function') {
+      sel = api.getSelectedRows();
+    }
+    if (!sel || sel.length === 0) { showError('Select stories to create'); return; }
+    progress.style.display='block';
+    try {
+      const res = await fetch('/api/stories/create_batch', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ stories: sel }) });
+      let data; let raw=''; try { data = await res.json(); } catch(_) { raw = await res.text(); }
+      if (!res.ok) { showError((data && data.error) || raw || 'Create JIRA failed'); return; }
+      const createdKeys = Array.isArray(data.created) ? data.created.filter(k => !!k) : [];
+      const errs = Array.isArray(data.errors) ? data.errors.filter(e => !!e) : [];
+      const createdText = createdKeys.length ? createdKeys.join(', ') : '0';
+      if (errs.length) {
+        const details = errs.map(e => String(e)).join('\n');
+        showError(`${createdText} Created | Errors: ${errs.length}\n${details}`);
+      } else {
+        showError(`${createdText} Created`);
+      }
+    } catch(e) { showError('Create JIRA failed'); }
+    finally { progress.style.display='none'; }
+  });
+</script>
+{% endblock %}

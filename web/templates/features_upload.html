@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block head %}
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-grid.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-theme-quartz.css">
+  <style>
+    .row { display:flex; gap:16px; align-items:center; }
+    #srcGrid, #outGrid { height: 280px; width: 100%; }
+    .flash { margin:8px 0; color:#b91c1c; }
+    .h1 { font-size: 28px; font-weight: 600; margin: 0 0 8px; display:none; }
+    .h2 { font-size: 20px; font-weight: 600; margin: 16px 0 8px; }
+    .hint { color:#64748b; font-size: 13px; }
+    .label { font-weight:600; margin:10px 0 6px; }
+    .drop { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:16px; border:1px dashed #cbd5e1; border-radius:8px; background:#f8fafc; }
+    .drop .left { display:flex; align-items:center; gap:12px; }
+    .cloud { font-size: 22px; color:#2563eb; }
+    .browse { background:#111827; color:#fff; border:none; border-radius:8px; padding:8px 12px; }
+    .fileName { margin-left:8px; color:#334155; font-size:13px; }
+    .progress { display:none; margin:8px 0; }
+    .progress .bar { width:100%; height:4px; background:#e5e7eb; position:relative; border-radius: 2px; overflow:hidden; }
+    .progress .bar::after { content:''; position:absolute; left:0; top:0; height:4px; width:20%; background:#2563eb; animation: slide 1s infinite; }
+    @keyframes slide { 0%{ left:0 } 50%{ left:80% } 100%{ left:0 } }
+  </style>
+{% endblock %}
+{% block content %}
+<div class="h1">Agile Tool</div>
+<div class="h2">Upload Requirements Excel</div>
+<div class="hint">Upload .xlsx/.xls</div>
+
+<div class="drop" id="dropzone">
+  <div class="left">
+    <div class="cloud">☁️</div>
+    <div>
+      <div>Drag and drop file here</div>
+      <div class="hint">Limit 200MB per file • XLSX, XLS, CSV</div>
+      <div class="fileName" id="fileName"></div>
+    </div>
+  </div>
+  <button class="browse" id="browseBtn" type="button">Browse files</button>
+  <input type="file" id="fileInput" accept=".csv,.xlsx,.xls" style="display:none" />
+</div>
+
+<div class="row" style="margin-top:12px">
+  <button id="genBtn" disabled>Generate Feature</button>
+  <button id="createJiraBtn" disabled>Create JIRA</button>
+  <div id="error" class="flash" style="display:none"></div>
+</div>
+<div class="progress" id="progress"><div class="bar"></div></div>
+  <script src="https://cdn.jsdelivr.net/npm/ag-grid-community/dist/ag-grid-community.min.js"></script>
+  <div class="label">Requirement</div>
+  <div class="ag-theme-quartz" id="srcGrid"></div>
+  <div class="label">Feature</div>
+  <div class="ag-theme-quartz" id="outGrid" style="margin-top:12px"></div>
+  <script>
+  const errorEl = document.getElementById('error');
+  function showError(msg){ errorEl.textContent = msg; errorEl.style.display = 'block'; }
+  function clearError(){ errorEl.textContent = ''; errorEl.style.display = 'none'; }
+
+    const srcEl = document.getElementById('srcGrid');
+    const outEl = document.getElementById('outGrid');
+
+    const srcOptions = { theme:'legacy', rowSelection:'multiple', columnDefs:[
+      { headerName:'', checkboxSelection:true, headerCheckboxSelection:true, width:40 },
+    ], rowData:[], defaultColDef:{resizable:true, sortable:true} };
+    const outOptions = { theme:'legacy', rowSelection:'multiple', columnDefs:[
+      { headerName:'', checkboxSelection:true, headerCheckboxSelection:true, width:40 },
+      { headerName:'Title', field:'title', flex:1 },
+      { headerName:'Description', field:'description', flex:2 },
+      { headerName:'Acceptance Criteria', field:'acceptance', flex:2 },
+      { headerName:'Benefit Hypothesis', field:'benefit', width:160 },
+      { headerName:'T-Shirt Size', field:'size', width:120 },
+      { headerName:'Priority', field:'priority', width:120 },
+      { headerName:'Business Value', field:'businessValue', width:140 },
+      { headerName:'Due Date', field:'dueDate', width:140 },
+      { headerName:'Type', field:'issue_type', width:100 }
+    ], rowData:[], defaultColDef:{resizable:true, sortable:true} };
+    let srcApi = null, outApi = null;
+    if (window.agGrid) {
+      if (typeof agGrid.createGrid === 'function') {
+        srcApi = agGrid.createGrid(srcEl, srcOptions);
+        outApi = agGrid.createGrid(outEl, outOptions);
+      } else if (typeof agGrid.Grid === 'function') {
+        new agGrid.Grid(srcEl, srcOptions); srcApi = srcOptions.api;
+        new agGrid.Grid(outEl, outOptions); outApi = outOptions.api;
+      }
+    }
+
+  const genBtn = document.getElementById('genBtn');
+  const createBtn = document.getElementById('createJiraBtn');
+  const dropzone = document.getElementById('dropzone');
+  const browseBtn = document.getElementById('browseBtn');
+  const fileInput = document.getElementById('fileInput');
+  const fileName = document.getElementById('fileName');
+  const progress = document.getElementById('progress');
+
+  function _sanitizeField(name, idx){
+    const s = String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    return s || `col_${idx+1}`;
+  }
+  async function setFile(f){
+    if (!f) return;
+    const dt = new DataTransfer(); dt.items.add(f); fileInput.files = dt.files;
+    fileName.textContent = f.name;
+    clearError(); genBtn.disabled = true; createBtn.disabled = true;
+    try {
+      const fd = new FormData(); fd.append('file', f);
+      const res = await fetch('/api/features/upload', { method:'POST', body: fd });
+      let data; let raw=''; try { data = await res.json(); } catch(_) { raw = await res.text(); }
+      if (!res.ok) { showError((data && data.error) || raw || 'Upload failed'); return; }
+      const cols = Array.isArray(data.columns) ? data.columns : [];
+      const listRows = Array.isArray(data.rows) ? data.rows : [];
+      const fields = cols.map((c, i) => _sanitizeField(c, i));
+      const defs = [{ headerName:'', checkboxSelection:true, headerCheckboxSelection:true, width:40 }].concat(
+        cols.map((c, i) => ({ headerName: c || `Column ${i+1}`, field: fields[i], flex:1 }))
+      );
+      const objRows = listRows.map(rArr => {
+        const o = {}; for (let i=0;i<fields.length;i++){ o[fields[i]] = (rArr && rArr[i] !== undefined && rArr[i] !== null) ? String(rArr[i]) : ''; }
+        return o;
+      });
+      if (srcApi && typeof srcApi.setGridOption === 'function') {
+        srcApi.setGridOption('columnDefs', defs);
+        srcApi.setGridOption('rowData', objRows);
+      } else if (srcOptions.api) {
+        if (typeof srcOptions.api.setColumnDefs === 'function') srcOptions.api.setColumnDefs(defs);
+        srcOptions.api.setRowData(objRows);
+      }
+      window.__srcPrimaryField = fields[0] || null;
+      genBtn.disabled = objRows.length === 0;
+    } catch(e) { showError('Upload failed'); }
+  }
+  browseBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => setFile(fileInput.files[0]));
+  dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.style.background = '#eef2ff'; });
+  dropzone.addEventListener('dragleave', (e) => { e.preventDefault(); dropzone.style.background = '#f8fafc'; });
+  dropzone.addEventListener('drop', (e) => {
+    e.preventDefault(); dropzone.style.background = '#f8fafc';
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    setFile(f);
+  });
+
+  // upload is automatic on file select; no separate upload button
+
+    genBtn.addEventListener('click', async () => {
+      clearError(); createBtn.disabled = true; genBtn.disabled = true; if (progress) progress.style.display='block';
+      let selected = [];
+      if (srcApi && typeof srcApi.getSelectedRows === 'function') selected = srcApi.getSelectedRows();
+      else if (srcOptions.api) selected = srcOptions.api.getSelectedRows();
+      const pf = window.__srcPrimaryField || null;
+      const requirements = selected.map(r=> pf ? r[pf] : '').filter(v=>!!v);
+      if (requirements.length === 0) { showError('Select at least one requirement'); if (progress) progress.style.display='none'; genBtn.disabled=false; return; }
+      try {
+        const res = await fetch('/api/features/generate_batch', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ requirements }) });
+        let data; let raw=''; try { data = await res.json(); } catch(_) { raw = await res.text(); }
+        if (!res.ok) { showError((data && data.error) || raw || 'Error generating. Please retry again.'); return; }
+        const rows = Array.isArray(data.rows) ? data.rows : [];
+        if (outApi && typeof outApi.setGridOption === 'function') outApi.setGridOption('rowData', rows);
+        else if (outOptions.api) outOptions.api.setRowData(rows);
+        createBtn.disabled = rows.length === 0;
+      } catch(e) { showError('Error generating. Please retry again.'); }
+      finally { if (progress) progress.style.display='none'; genBtn.disabled=false; }
+    });
+
+    createBtn.addEventListener('click', () => {
+      clearError(); createBtn.disabled = true; if (progress) progress.style.display='block';
+      let sel = [];
+      if (outApi && typeof outApi.getSelectedRows === 'function') sel = outApi.getSelectedRows();
+      else if (outOptions.api) sel = outOptions.api.getSelectedRows();
+      const form = document.createElement('form'); form.method='POST'; form.action='/features/create_jira';
+      const input = document.createElement('input'); input.type='hidden'; input.name='payload'; input.value=JSON.stringify(sel);
+      form.appendChild(input); document.body.appendChild(form); form.submit();
+    });
+  </script>
+{% endblock %}

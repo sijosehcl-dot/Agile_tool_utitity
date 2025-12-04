@@ -1,0 +1,17 @@
+{
+  "jira": {
+    "url": "",
+    "user": "",
+    "token": "",
+    "project": ""
+  },
+  "llm": {
+    "api_key": "",
+    "model": "gemini-3-pro-preview"
+  },
+  "confluence": {
+    "url": "",
+    "space": "",
+    "page": ""
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "issue_types": {
+    "feature": "Feature",
+    "story": "Story",
+    "subtask": "Sub-task"
+  },
+  "fields": {
+    "summary": "summary",
+    "description": "description",
+    "story_points": "customfield_10016",
+    "epic_link": "customfield_10014",
+    "business_value": "customfield_10115",
+    "priority": "priority",
+    "Acceptance Criteria": "customfield_10041",
+    "Benefit Hypothesis": "customfield_10043",
+    "work_type": "customfield_10112",
+    "Size": "customfield_10114",
+    "DOR": "customfield_10113",
+    "Sprint": "customfield_10020",
+    "duedate": "duedate"
+  },
+  "work_type_synonyms": {
+    "Feature": ["Feature"],
+    "Story": ["Story"],
+    "Sub-task": ["Sub-task", "Subtask"]
+  },
+  "size_synonyms": {
+    "XS": ["XS"],
+    "S": ["S"],
+    "M": ["M"],
+    "L": ["L"],
+    "XL": ["XL"]
+  }
+}

@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+{% block head %}
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-grid.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-theme-quartz.css">
+  <style>
+    .hint { color:#64748b; font-size: 13px; margin-bottom:8px; }
+    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    .row .field { display:flex; flex-direction:column; }
+    .row input { padding:6px; }
+    .progress { display:none; margin:8px 0; }
+    .progress .bar { width:100%; height:4px; background:#e5e7eb; position:relative; border-radius: 2px; overflow:hidden; }
+    .progress .bar::after { content:''; position:absolute; left:0; top:0; height:4px; width:20%; background:#2563eb; animation: slide 1s infinite; }
+    @keyframes slide { 0%{ left:0 } 50%{ left:80% } 100%{ left:0 } }
+    #teamGrid, #resGrid { height: 320px; }
+    #summaryGrid { height: 120px; }
+    .label { font-weight:600; margin:10px 0 6px; }
+  </style>
+{% endblock %}
+{% block content %}
+<h2>Capacity Planning</h2>
+<div id="error" class="flash" style="display:none"></div>
+
+<div class="row">
+  <div class="field"><div class="hint">Sprint Name</div><select id="sprintName"></select></div>
+  <div class="field"><div class="hint">Sprint Days (excluding holidays)</div><input id="sprintDays" type="number" min="0" step="1" placeholder="10"></div>
+  <div class="field"><div class="hint">Haircut % (meetings/trainings)</div><input id="haircutPct" type="number" min="0" max="100" step="0.1" placeholder="10"></div>
+  <div class="field"><div class="hint">Total Team Members</div><input id="teamCount" type="number" min="0" step="1" placeholder="5"></div>
+  <div class="field" style="align-self:flex-end"><button id="calcBtn">Calculate</button></div>
+  <div class="field" style="align-self:flex-end"><button id="saveBtn" disabled>Save</button></div>
+  </div>
+
+<div class="label">Team Members</div>
+<div class="ag-theme-quartz" id="teamGrid"></div>
+
+<div class="label" style="margin-top:12px">Sprint Capacity Summary</div>
+<div class="ag-theme-quartz" id="summaryGrid"></div>
+
+<div class="label" style="margin-top:12px">Resource Capacity</div>
+<div class="ag-theme-quartz" id="resGrid"></div>
+
+<div class="progress" id="progress"><div class="bar"></div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community/dist/ag-grid-community.min.js"></script>
+<script>
+  const errorEl = document.getElementById('error');
+  function showError(msg){ errorEl.textContent = msg; errorEl.style.display = 'block'; }
+  function clearError(){ errorEl.textContent = ''; errorEl.style.display = 'none'; }
+
+  const teamGridEl = document.getElementById('teamGrid');
+  const summaryGridEl = document.getElementById('summaryGrid');
+  const resGridEl = document.getElementById('resGrid');
+  let teamApi=null, summaryApi=null, resApi=null;
+
+  const roles = ['DEV','QA','BA'];
+  const teamCols = [
+    { headerName: 'Name', field: 'name', editable: true, width: 200 },
+    { headerName: 'Role', field: 'role', editable: true, width: 140, cellEditor: 'agSelectCellEditor', cellEditorParams: { values: roles } },
+    { headerName: 'Tech Stack', field: 'tech', editable: true, width: 220 },
+    { headerName: 'Leave days', field: 'leave', editable: true, width: 140, valueSetter:(p)=>{ const v = Number(p.newValue||0); p.data.leave = isNaN(v)? 0 : v; return true; } },
+  ];
+  const teamOptions = { theme:'legacy', columnDefs:teamCols, defaultColDef:{resizable:true, sortable:true}, rowData: [] };
+  if (window.agGrid) {
+    if (typeof agGrid.createGrid === 'function') { teamApi = agGrid.createGrid(teamGridEl, teamOptions); }
+    else { new agGrid.Grid(teamGridEl, teamOptions); teamApi = teamOptions.api; }
+  }
+
+  const summaryCols = [
+    { headerName: 'Total Sprint Days', field: 'total_sprint_days', width: 180 },
+    { headerName: 'Available Sprint Days', field: 'available_sprint_days', width: 200 },
+    { headerName: 'Available Capacity', field: 'available_capacity', width: 180 },
+    { headerName: 'Available Hours', field: 'available_hours', width: 160 },
+    { headerName: 'Leave days', field: 'leave_days', width: 140 },
+  ];
+  const summaryOptions = { theme:'legacy', columnDefs:summaryCols, defaultColDef:{resizable:true, sortable:true}, rowData: [] };
+  if (window.agGrid) {
+    if (typeof agGrid.createGrid === 'function') { summaryApi = agGrid.createGrid(summaryGridEl, summaryOptions); }
+    else { new agGrid.Grid(summaryGridEl, summaryOptions); summaryApi = summaryOptions.api; }
+  }
+
+  const resCols = [
+    { headerName: 'Resource name', field: 'name', width: 200 },
+    { headerName: 'Role', field: 'role', width: 140 },
+    { headerName: 'Tech Stack', field: 'tech', width: 220 },
+    { headerName: 'Leave days', field: 'leave', width: 140 },
+    { headerName: 'Available Capacity', field: 'available_capacity', width: 180 },
+    { headerName: 'Available hours', field: 'available_hours', width: 160 },
+  ];
+  const resOptions = { theme:'legacy', columnDefs:resCols, defaultColDef:{resizable:true, sortable:true}, rowData: [] };
+  if (window.agGrid) {
+    if (typeof agGrid.createGrid === 'function') { resApi = agGrid.createGrid(resGridEl, resOptions); }
+    else { new agGrid.Grid(resGridEl, resOptions); resApi = resOptions.api; }
+  }
+
+  const calcBtn = document.getElementById('calcBtn');
+  const saveBtn = document.getElementById('saveBtn');
+  const sprintNameEl = document.getElementById('sprintName');
+  const sprintDaysEl = document.getElementById('sprintDays');
+  const haircutEl = document.getElementById('haircutPct');
+  const teamCountEl = document.getElementById('teamCount');
+
+  async function loadOpenSprints(){
+    try {
+      const res = await fetch('/api/jira/open_sprints');
+      let data; let raw=''; try { data = await res.json(); } catch(_) { raw = await res.text(); }
+      if (!res.ok) { showError((data && data.error) || raw || 'Fetch open sprints failed'); return; }
+      const names = Array.isArray(data.names) ? data.names : [];
+      sprintNameEl.innerHTML = names.map(n => `<option value="${String(n)}">${String(n)}</option>`).join('');
+    } catch(e) {
+      showError('Fetch open sprints failed');
+    }
+  }
+  loadOpenSprints();
+
+  function setTeamRowsByCount(){
+    clearError();
+    const n = Number(teamCountEl.value||0);
+    const rows = [];
+    for (let i=0;i<n;i++) rows.push({ name:'', role: roles[i%roles.length], tech:'', leave: 0 });
+    if (teamApi && typeof teamApi.setGridOption === 'function') teamApi.setGridOption('rowData', rows);
+    else if (teamOptions.api) teamOptions.api.setRowData(rows);
+  }
+  teamCountEl.addEventListener('input', setTeamRowsByCount);
+
+  function getTeamRows(){
+    const api = (teamApi && typeof teamApi.forEachNode === 'function') ? teamApi : teamOptions.api;
+    const out = [];
+    if (api && typeof api.forEachNode === 'function') {
+      api.forEachNode(n => { if (!n || !n.data) return; out.push({ name: n.data.name||'', role:n.data.role||'', tech:n.data.tech||'', leave: Number(n.data.leave||0) }); });
+    }
+    return out;
+  }
+
+  calcBtn.addEventListener('click', () => {
+    clearError();
+    const sprintDays = Number(sprintDaysEl.value||0);
+    const hcPct = Number(haircutEl.value||0);
+    const teamCount = Number(teamCountEl.value||0);
+    const team = getTeamRows();
+    const leavesTotal = team.reduce((a,b)=> a + (Number(b.leave||0)||0), 0);
+    const totalDaysInSprint = sprintDays * teamCount;
+    const haircutDays = (hcPct/100) * totalDaysInSprint;
+    const sprintCapacity = Math.max(0, totalDaysInSprint - (haircutDays + leavesTotal));
+    const availableSprintDays = Math.max(0, totalDaysInSprint - leavesTotal);
+    const availableHours = Math.max(0, sprintCapacity) * 8;
+    const summaryRow = [{
+      total_sprint_days: totalDaysInSprint,
+      available_sprint_days: Number(availableSprintDays.toFixed(2)),
+      available_capacity: Number(sprintCapacity.toFixed(2)),
+      available_hours: Number(availableHours.toFixed(2)),
+      leave_days: Number(leavesTotal.toFixed(2)),
+    }];
+    if (summaryApi && typeof summaryApi.setGridOption === 'function') summaryApi.setGridOption('rowData', summaryRow);
+    else if (summaryOptions.api) summaryOptions.api.setRowData(summaryRow);
+
+    const resRows = team.map(r => {
+      const hcRes = (hcPct/100) * sprintDays;
+      const leave = Number(r.leave||0);
+      const availCap = Math.max(0, sprintDays - (hcRes + leave));
+      const availHrs = availCap * 8;
+      return { name:r.name||'', role:r.role||'', tech:r.tech||'', leave:Number(leave.toFixed(2)), available_capacity:Number(availCap.toFixed(2)), available_hours:Number(availHrs.toFixed(2)) };
+    });
+    if (resApi && typeof resApi.setGridOption === 'function') resApi.setGridOption('rowData', resRows);
+    else if (resOptions.api) resOptions.api.setRowData(resRows);
+    saveBtn.disabled = false;
+  });
+
+  saveBtn.addEventListener('click', async () => {
+    clearError();
+    const sprintDays = Number(sprintDaysEl.value||0);
+    const hcPct = Number(haircutEl.value||0);
+    const teamCount = Number(teamCountEl.value||0);
+    const team = getTeamRows();
+    const sumApi = (summaryApi && typeof summaryApi.getDisplayedRowCount === 'function') ? summaryApi : summaryOptions.api;
+    let summary = [];
+    try {
+      if (sumApi && typeof sumApi.forEachNode === 'function') {
+        const rows=[]; sumApi.forEachNode(n=>{ if(n&&n.data) rows.push(n.data); }); summary = rows;
+      }
+    } catch(_) {}
+    const resApi2 = (resApi && typeof resApi.forEachNode === 'function') ? resApi : resOptions.api;
+    const resOut=[]; if (resApi2 && typeof resApi2.forEachNode === 'function') { resApi2.forEachNode(n=>{ if(n&&n.data) resOut.push(n.data); }); }
+    const record = {
+      sprint_name: (document.getElementById('sprintName').value||'').trim(),
+      sprint_days: sprintDays,
+      haircut_percent: hcPct,
+      team_members: teamCount,
+      resources: team,
+      summary: summary,
+      resource_summary: resOut,
+    };
+    try {
+      const res = await fetch('/api/sprint/capacity/save', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(record) });
+      let data; let raw=''; try { data = await res.json(); } catch(_) { raw = await res.text(); }
+      if (!res.ok) { showError((data && data.error) || raw || 'Save failed'); return; }
+      showError('Saved');
+    } catch(e) {
+      showError('Save failed');
+    }
+  });
+</script>
+{% endblock %}

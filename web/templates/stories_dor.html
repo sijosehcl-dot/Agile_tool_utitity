@@ -1,0 +1,214 @@
+{% extends "base.html" %}
+{% block head %}
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-grid.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-theme-quartz.css">
+  <style>
+    .hint { color:#64748b; font-size: 13px; margin-bottom:8px; }
+    textarea { width:100%; min-height: 120px; }
+    .progress { display:none; margin:8px 0; }
+    .progress .bar { width:100%; height:4px; background:#e5e7eb; position:relative; border-radius: 2px; overflow:hidden; }
+    .progress .bar::after { content:''; position:absolute; left:0; top:0; height:4px; width:20%; background:#2563eb; animation: slide 1s infinite; }
+    @keyframes slide { 0%{ left:0 } 50%{ left:80% } 100%{ left:0 } }
+    #jiraGrid, #dorGrid { height: 420px; }
+    #jiraGrid { overflow:auto }
+    .label { font-weight:600; margin:10px 0 6px; }
+  </style>
+{% endblock %}
+{% block content %}
+<h2>Story DOR Check</h2>
+<div class="hint">JQL</div>
+<textarea id="jqlInput" placeholder="project = SCRUM AND issuetype = Story ORDER BY created DESC"></textarea>
+<p>
+  <button id="fetchBtn">Fetch</button>
+  <button id="checkDorBtn" disabled>Check DOR</button>
+  <button id="updateJiraBtn" disabled>Update DOR</button>
+  </p>
+
+<div class="progress" id="progress"><div class="bar"></div></div>
+<div id="error" class="flash" style="display:none"></div>
+
+<div class="label">Stories</div>
+<div class="ag-theme-quartz" id="jiraGrid"></div>
+
+<div class="label" style="margin-top:12px">Story DOR Results</div>
+<div class="ag-theme-quartz" id="dorGrid"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community/dist/ag-grid-community.min.js"></script>
+<script>
+  const errorEl = document.getElementById('error');
+  const progress = document.getElementById('progress');
+  function showError(msg){ errorEl.textContent = msg; errorEl.style.display = 'block'; }
+  function clearError(){ errorEl.textContent = ''; errorEl.style.display = 'none'; }
+
+  const jiraGridEl = document.getElementById('jiraGrid');
+  let jiraApi = null;
+  const jiraCols = [
+    { headerName: '', checkboxSelection: true, headerCheckboxSelection: true, width: 40 },
+    { headerName: 'Key', field: 'key', width: 120 },
+    { headerName: 'Title', valueGetter:(p)=> (p&&p.data?p.data.summary:''), tooltipValueGetter:(p)=> String((p&&p.value)||''), width:200 },
+    { headerName: 'Summary', field: 'summary', tooltipField:'summary', width:240 },
+    { headerName: 'Description', field: 'description', flex: 2 },
+    { headerName: 'Acceptance Criteria', field: 'acceptance', tooltipField:'acceptance', width:240 },
+    { headerName: 'Story Points', field: 'story_points', width: 140 },
+    { headerName: 'Priority', field: 'priority', width: 120 },
+    { headerName: 'Status', field: 'status', width: 140 },
+    { headerName: 'Due Date', field: 'dueDate', width: 140 },
+  ];
+  const jiraOptions = { theme:'legacy', rowSelection:'multiple', columnDefs:jiraCols, defaultColDef:{resizable:true, sortable:true, tooltipValueGetter:(p)=> String((p&&p.value)||'')}, tooltipShowDelay:0, tooltipHideDelay:10000, rowData:[] };
+  if (window.agGrid && jiraGridEl) {
+    if (typeof agGrid.createGrid === 'function') { jiraApi = agGrid.createGrid(jiraGridEl, jiraOptions); }
+    else { new agGrid.Grid(jiraGridEl, jiraOptions); jiraApi = jiraOptions.api; }
+  }
+
+  const dorGridEl = document.getElementById('dorGrid');
+  let dorApi = null;
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]'/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
+  const dorCols = [
+    { headerName: '', checkboxSelection: true, headerCheckboxSelection: true, width: 40 },
+    { headerName: 'Key', field: 'key', width: 120 },
+    { headerName: 'Summary', field: 'summary', flex: 2 },
+    { headerName: 'Score', field: 'score', width: 100 },
+    { headerName: 'Status', field: 'status', width: 120 },
+    { headerName: 'Reason', field: 'reason', flex: 2, tooltipField: 'reason', cellRenderer: (p) => {
+        const v = p && p.value ? String(p.value) : '';
+        const t = v.replace(/[&<>"]'/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
+        const s = t.length > 160 ? t.slice(0,160) + '…' : t;
+        return `<span title="${t}">${s}</span>`;
+      } }
+  ];
+  const dorOptions = { theme:'legacy', rowSelection:'multiple', columnDefs:dorCols, defaultColDef:{resizable:true, sortable:true}, tooltipShowDelay: 0, tooltipHideDelay: 10000, rowData:[] };
+  if (window.agGrid && dorGridEl) {
+    if (typeof agGrid.createGrid === 'function') { dorApi = agGrid.createGrid(dorGridEl, dorOptions); }
+    else { new agGrid.Grid(dorGridEl, dorOptions); dorApi = dorOptions.api; }
+  }
+
+  const fetchBtn = document.getElementById('fetchBtn');
+  const checkDorBtn = document.getElementById('checkDorBtn');
+  const updateJiraBtn = document.getElementById('updateJiraBtn');
+
+  fetchBtn.addEventListener('click', async () => {
+    clearError(); progress.style.display='block';
+    const jql = document.getElementById('jqlInput').value.trim();
+    if (!jql) { showError('Enter JQL'); progress.style.display='none'; return; }
+    try {
+      const res = await fetch('/api/stories/jira_search', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ jql }) });
+      let data; let raw=''; try { data = await res.json(); } catch(_) { raw = await res.text(); }
+      if (!res.ok) { showError((data && data.error) || raw || 'Fetch failed'); return; }
+      const rows = Array.isArray(data.rows) ? data.rows : [];
+      const preferred = ['key','description','acceptance','story_points','priority','work_type'];
+      const cols = [
+        { headerName: '', checkboxSelection: true, headerCheckboxSelection: true, width: 40 },
+        { headerName: 'Title', valueGetter:(p)=> (p&&p.data?p.data.summary:''), tooltipValueGetter:(p)=> String((p&&p.value)||''), width:200 }
+      ];
+      const added = new Set();
+      const addCol = (f, header) => { added.add(f); cols.push({ headerName: header || f.replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()), field: f, tooltipField: f, width: 160 }); };
+      const keys = rows[0] ? Object.keys(rows[0]) : [];
+      for (const f of preferred) {
+        if (!keys.includes(f)) continue;
+        if (f === 'story_points') addCol(f, 'Story Point');
+        else if (f === 'work_type') addCol(f, 'Work Type');
+        else if (f === 'acceptance') addCol(f, 'Acceptance Criteria');
+        else if (f === 'priority') addCol(f, 'Priority');
+        else if (f === 'description') addCol(f, 'Description');
+        else if (f === 'key') addCol(f, 'Key');
+        else addCol(f);
+      }
+      if (jiraApi && typeof jiraApi.destroy === 'function') {
+        try { jiraApi.destroy(); } catch(_) {}
+        jiraApi = null;
+      }
+      try { jiraGridEl.innerHTML = ''; } catch(_) {}
+      try {
+        jiraOptions.columnDefs = cols;
+        jiraOptions.rowData = rows;
+        if (typeof agGrid.createGrid === 'function') {
+          jiraApi = agGrid.createGrid(jiraGridEl, jiraOptions);
+        } else {
+          new agGrid.Grid(jiraGridEl, jiraOptions);
+          jiraApi = jiraOptions.api;
+        }
+      } catch(_) {
+        if (jiraOptions.api && typeof jiraOptions.api.setColumnDefs === 'function') {
+          jiraOptions.api.setColumnDefs(cols);
+          jiraOptions.api.setRowData(rows);
+        }
+      }
+      checkDorBtn.disabled = rows.length === 0;
+      updateJiraBtn.disabled = true;
+      if (dorApi && typeof dorApi.setGridOption === 'function') { dorApi.setGridOption('rowData', []); }
+      else if (dorOptions.api) { dorOptions.api.setRowData([]); }
+    } catch(e) { showError('Fetch failed'); }
+    finally { progress.style.display='none'; }
+  });
+
+  checkDorBtn.addEventListener('click', async () => {
+    clearError();
+    const api = (jiraApi && typeof jiraApi.getSelectedRows === 'function') ? jiraApi : jiraOptions.api;
+    let sel = [];
+    if (api && typeof api.getSelectedRows === 'function') {
+      sel = api.getSelectedRows();
+    }
+    if (!sel || sel.length === 0) { showError('Select items'); return; }
+    progress.style.display='block';
+    try {
+      const res = await fetch('/api/stories/dor_check', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ items: sel }) });
+      let data; let raw=''; try { data = await res.json(); } catch(_) { raw = await res.text(); }
+      if (!res.ok) { showError((data && data.error) || raw || 'DOR check failed'); return; }
+      const rows = Array.isArray(data.rows) ? data.rows : [];
+      const enableUpdate = rows.length > 0;
+      if (dorApi && typeof dorApi.setGridOption === 'function') { dorApi.setGridOption('rowData', rows); }
+      else if (dorOptions.api) { dorOptions.api.setRowData(rows); }
+      updateJiraBtn.disabled = !enableUpdate;
+    } catch(e) { showError('DOR check failed'); }
+    finally { progress.style.display='none'; }
+  });
+
+  updateJiraBtn.addEventListener('click', async () => {
+    clearError();
+    const api = (dorApi && typeof dorApi.getSelectedRows === 'function') ? dorApi : dorOptions.api;
+    let sel = [];
+    if (api && typeof api.getSelectedRows === 'function') {
+      sel = api.getSelectedRows();
+    }
+    if (!sel || sel.length === 0) { showError('Select stories'); return; }
+    const passKeys = [];
+    const failKeys = [];
+    for (const r of sel) {
+      const st = String(r.status||'').toLowerCase();
+      const sc = Number(r.score||0);
+      const k = r.key;
+      if (!k) continue;
+      if (st === 'pass' || sc >= 85) passKeys.push(k);
+      else failKeys.push(k);
+    }
+    if (!passKeys.length && !failKeys.length) { showError('No valid story keys selected'); return; }
+    progress.style.display='block';
+    try {
+      const res = await fetch('/api/stories/jira_update_dor_flag', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ pass_keys: passKeys, fail_keys: failKeys }) });
+      let data; let raw=''; try { data = await res.json(); } catch(_) { raw = await res.text(); }
+      if (!res.ok) { showError((data && data.error) || raw || 'Update failed'); return; }
+      const results = Array.isArray(data.results) ? data.results : [];
+      if (results.length === 0) {
+        const ok = Array.isArray(data.updated) ? data.updated.length : 0;
+        const errs = Array.isArray(data.errors) ? data.errors.length : 0;
+        showError(`Updated: ${ok}${errs? ' | Errors: '+errs : ''}`);
+        return;
+      }
+      const lines = results.map(r => {
+        const key = r && r.key ? String(r.key) : '';
+        const dor = r && r.dor ? String(r.dor) : '';
+        const st = r && r.status ? String(r.status) : '';
+        const ok = !!(r && r.success);
+        const err = r && r.error ? String(r.error) : '';
+        const parts = [];
+        if (dor) parts.push(`DOR=${dor}`);
+        if (st) parts.push(`Status=${st}`);
+        const main = parts.length ? parts.join(', ') : '';
+        return `${key}: ${main}${ok? ' — OK' : (err? ' — ERROR: '+err : ' — ERROR')}`;
+      });
+      showError(lines.join('\n'));
+    } catch(e) { showError('Update failed'); }
+    finally { progress.style.display='none'; }
+  });
+</script>
+{% endblock %}

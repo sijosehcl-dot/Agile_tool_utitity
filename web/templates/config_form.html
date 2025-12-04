@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>{{ title }}</h2>
+<form method="post">
+  {% for label, name, value in fields %}
+    <div style="margin:8px 0;">
+      <label>{{ label }}</label><br/>
+      {% if secret_names and name in secret_names %}
+        <input type="password" name="{{ name }}" value="{{ value }}" style="width:50%;" />
+      {% else %}
+        <input type="text" name="{{ name }}" value="{{ value }}" style="width:50%;" />
+      {% endif %}
+    </div>
+  {% endfor %}
+  <p><button type="submit">Save</button></p>
+ </form>
+{% endblock %}
+
